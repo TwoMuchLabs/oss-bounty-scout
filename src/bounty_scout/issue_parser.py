@@ -385,31 +385,42 @@ def parse_issue(raw: dict) -> ParsedIssue:
     return issue
 
 
+# Interactive sessions: what marks one, and how to split it into (code typed, output printed).
+_TRANSCRIPTS = [(re.compile(r"^In \[\d+\]: ", re.M), _split_ipython), (re.compile(r"^>>> ", re.M), _split_repl)]
+
+
+def _transcript(text: str) -> tuple[str, str] | None:
+    """Code and output of an IPython or ``>>>`` session, or None when the text is not one."""
+    for prompt, split in _TRANSCRIPTS:
+        if prompt.search(text):
+            code, output = split(text)
+            if code:
+                return code, output
+    return None
+
+
+def _add_shell(issue: ParsedIssue, text: str) -> None:
+    commands, output = _split_console(text)
+    if not commands:  # plain script: every non-comment line is a command
+        commands = [l.strip() for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
+        output = ""
+    issue.shell_commands.extend(commands)
+    if output and _looks_like_log(output):
+        issue.error_logs.append(output)
+
+
 def _add_block(issue: ParsedIssue, lang: str, text: str, section: str) -> None:
     text = text.strip("\n")
     if not text.strip():
         return
     kind = _classify(lang, text, section)
-    if kind in ("python", "unknown", "log") and re.search(r"^In \[\d+\]: ", text, re.M):
-        code, output = _split_ipython(text)
-        if code:
-            issue.code_blocks.append(CodeBlock(lang or "python", code, section, "python"))
-            issue.error_logs.append(output)
-            return
-    if kind in ("python", "unknown", "log") and re.search(r"^>>> ", text, re.M):
-        code, output = _split_repl(text)
-        if code:
-            issue.code_blocks.append(CodeBlock(lang or "python", code, section, "python"))
-            issue.error_logs.append(output)
-            return
+    session = _transcript(text) if kind in ("python", "unknown", "log") else None
+    if session:
+        issue.code_blocks.append(CodeBlock(lang or "python", session[0], section, "python"))
+        issue.error_logs.append(session[1])
+        return
     if kind == "shell":
-        commands, output = _split_console(text)
-        if not commands:  # plain script: every non-comment line is a command
-            commands = [l.strip() for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
-            output = ""
-        issue.shell_commands.extend(commands)
-        if output and _looks_like_log(output):
-            issue.error_logs.append(output)
+        _add_shell(issue, text)
     elif kind == "log":
         issue.error_logs.append(text)
     issue.code_blocks.append(CodeBlock(lang, text, section, kind))
