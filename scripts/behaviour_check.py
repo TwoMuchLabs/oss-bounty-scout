@@ -123,6 +123,25 @@ SCENARIOS = [
 ]
 
 
+# Shapes the recorded issues turned out not to contain (found by planting bugs the check then missed).
+HANDMADE = [
+    '### Steps to reproduce\n\n1. run `make thing`\n2. then execute `python app.py --flag 3`\n\n```sh\n$ pytest -k foo\nValueError: boom\n```\n\n```python\nimport os\nprint(os.sep)\n```',
+    '~~~python\nx = 1\n```\nprint(x)\n~~~\n\n```\n~~~\nValueError: boom\n```\n',
+    "````\n```\nKeyError: 'inner'\n```\n````\n\n```python\nraise KeyError('inner')\n````\nafter\n",
+    '1. open the app\n2. call `run()`\n\n### Environment\n\n| Key | Value |\n|---|---|\n| OS | macOS 14 |\n| python | 3.11.2 |\n\n### Python version\n\n3.12.1\n\n### Node\n\n_No response_\n',
+    '```\nIn [1]: import statskit\n\nIn [2]: statskit.mean([])\n   ...: \nOut[2]: 0\nZeroDivisionError: division by zero\n```\n\n```\n>>> \n>>>\nValueError: x\n```\n\n```pycon\n>>> mean([])\n... \nZeroDivisionError: division by zero\n```',
+    "```python\nfrom os.path import *\nprint(join('a', undefined_name))\n```\n\nNameError: name 'undefined_name' is not defined",
+    "```python\nimport pytest\n\nclass TestThing:\n    def test_a(self):\n        assert mean([]) == 0\n\n@pytest.mark.parametrize('n', [1])\ndef test_b(n):\n    assert n\n\nasync def test_c():\n    pass\n```\n\n```\nFAILED t.py::TestThing::test_a - assert 1 == 0\n```",
+    "```python\ndef test_a():\n    assert Path('x').exists()\n\ndef test_b():\n    assert datetime.now() and os.getcwd() and Flask(__name__) and werkzeug.routing.Map()\n```\n\nAssertionError",
+    "```python\nmatch command:\n    case {'a': x, **rest}:\n        print(x, rest, y)\n    case [first, *others] as whole:\n        print(first, others, whole)\ntry:\n    pass\nexcept ValueError as err:\n    del err\nprint([i for i in range(3)], lambda q: q + z)\n```\n\nNameError: name 'y' is not defined",
+    "```js\nimport express from 'express'\nconst app = express()\n```\n\n```javascript\nconst x = require('express')\nimport y from 'y'\n```\n\nTypeError: app.foo is not a function\n    at Object.<anonymous> (/srv/app/index.js:3:5)",
+    '```console\n$ sudo apt install thing\n$ cd project\n$ pip install -e .\n```\n\nIt worked in 1.2.3 and broke in 1.3.0.\n\nerror: something failed',
+    '```python\nimport sys\nprint(sys.version)\n```\n\n```python\n    import statskit\n    statskit.mean([])\n```\n\n```python\nthis is not python\n```\n\n```\nrepro.py:3: error: Argument 1 has incompatible type  [arg-type]\n```\npyright',
+    'panic: runtime error: index out of range [3] with length 3\n\ngoroutine 1 [running]:\nmain.main()\n\t/home/u/app/main.go:12 +0x1d\n\nGo version: go1.22.1\nrustc 1.77.0\nWindows Server 2022',
+    "```python\nimport werkzeug\nimport flask as f\nwerkzeug.routing.Map()\nwerkzeug.nothing.here()\nflask.json.dumps({})\n```\n\n```sh\npython3 repro.py --port 8080\n```\n\nAttributeError: module 'werkzeug' has no attribute 'routing'",
+]
+
+
 def digest(value) -> str:
     return hashlib.sha1(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -171,6 +190,7 @@ def load_issues(path: str | None) -> list[dict]:
 
     issues = [dict(fixture.issue(), _id="fixture")]
     issues += [dict(fixture.issue(number=100 + i, **fields), _id=f"scenario/{name}") for i, (name, _r, fields, *_rest) in enumerate(SCENARIOS)]
+    issues += [dict(fixture.issue(number=900 + i, body=body), _id=f"handmade/{i}") for i, body in enumerate(HANDMADE)]
     if path:
         with gzip.open(path, "rt", encoding="utf-8") as fh:
             for repo, found in sorted(json.load(fh).items()):
@@ -201,8 +221,8 @@ def snap_text_functions(issues: list[dict], trees: list[Path], snap: dict) -> No
         for label, kwargs in (("plain", {}), ("cmd", {"test_cmd": "pytest -x -k thing"}), ("match", {"match": "boom 42"})):
             plan = safe(repro.build_plan, issue_parser.parse_issue(clean), **kwargs)
             if dataclasses.is_dataclass(plan):
-                tree = trees[i % len(trees)] if trees else None
-                if tree and label == "plain":
+                tree = trees[(i // 3) % len(trees)] if trees else None
+                if tree and label == "plain" and i % 3 == 0:  # indexing a project is the slow step
                     done = safe(repro.complete_imports, plan, tree)
                     snap[f"imports/{key}"] = digest([done, dataclasses.asdict(plan)])
                 plan = dataclasses.asdict(plan)
