@@ -40,7 +40,7 @@ class Options:
 @dataclass
 class TriageResult:
     issue: ParsedIssue
-    status: str  # reproduced | not-reproduced | inconclusive | needs-info | needs-approval
+    status: str  # reproduced | not-reproduced | inconclusive | needs-info | needs-approval | unsupported
     bad_ref: str = "HEAD"
     bad_sha: str = ""
     plan: ReproPlan | None = None
@@ -53,6 +53,8 @@ class TriageResult:
     suspect: Suspect | None = None
     fix: Fix | None = None
     notes: list[str] = field(default_factory=list)
+    regression: str | None = None  # "yes" | "no" | "unknown", once history has been searched
+    oldest_failing: str | None = None  # when regression == "no": the oldest version that already fails
     ai_label: str | None = None  # set when AI assistance was switched on
     ai_calls: int = 0
     ai_test_gate: str | None = None  # "reported-error" | "assertion" when the test in use was AI-written
@@ -74,6 +76,13 @@ def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None,
     result.ai_label = ai.label if ai else None
 
     test_cmd = opts.test_cmd or (cfg.test if cfg.test and "{test_file}" not in cfg.test else None)
+    if issue.kind == "type-check" and not test_cmd:
+        result.status = "unsupported"
+        result.notes.append(
+            "This report is about what a type checker says, not about what the code does when it runs, so there is "
+            "nothing here for the scout to execute. Pass `--test-cmd` with your type-check command to bisect it anyway."
+        )
+        return result
     plan = build_plan(issue, test_cmd, opts.match)
     if plan is None and not ai:
         result.notes.append("No runnable reproduction was found in the issue. Pass `--test-cmd` to supply one.")
@@ -254,12 +263,23 @@ def _trace(repo, result, issue, cfg, opts, spec, head_frames) -> None:
     good, probes = bisect_mod.find_good(repo, candidates, spec)
     result.probes = [(ref, v.status, v.reason) for ref, v in probes]
     if good is None:
-        result.notes.append(
-            "No known-good commit was found (tried: " + (", ".join(f"`{c}`" for c in candidates) or "none")
-            + "), so this may not be a regression. Pass `--good <ref>` if you know a working version."
-        )
+        failing = [ref for ref, verdict in probes if verdict.status == BAD]
+        if failing:
+            # Candidates run newest to oldest, so the last failing one is the oldest version that has the bug.
+            oldest = failing[-1][:10] if re.fullmatch(r"[0-9a-f]{40}", failing[-1]) else failing[-1]
+            result.regression, result.oldest_failing = "no", oldest
+            result.notes.append(
+                f"Probably not a regression: it already fails the same way at `{oldest}`, the oldest version that "
+                "could be tested. Pass `--good <ref>` if you know a version where it worked."
+            )
+        else:
+            result.regression = "unknown"
+            result.notes.append(
+                "No earlier version could be tested here (tried: " + (", ".join(f"`{c}`" for c in candidates) or "none")
+                + "); they fail for other reasons, such as needing an older runtime. Pass `--good <ref>` if you know a working version."
+            )
         return
-    result.good_ref = good
+    result.good_ref, result.regression = good, "yes"
 
     result.bisect = bisect_mod.bisect(repo, good, result.bad_sha, spec, opts.first_parent)
     if result.bisect.status != "found":

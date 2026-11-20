@@ -1,0 +1,38 @@
+{
+  "_about": "Culprit commits the field test found on 20 Nov 2026. A replay that loses or changes one fails the job. Two are confirmed by maintainers in the issue thread (attrs #804, click #3449); the rest are unconfirmed.",
+  "culprits": {
+    "pallets/werkzeug": {
+      "2706": "082e0e5b9c01fa3178ac0153413f082616f10914",
+      "2465": "88125beebc6463e571cef3ca84eccfad0c818ae3",
+      "2359": "7fff62feaaa5ae398d443ecf4349adc826d7da6a"
+    },
+    "python-poetry/tomlkit": {
+      "476": "7f237d8f5d07d23422571e9daaf411f4a2356855",
+      "405": "ad7dfe0c96b509f0508cdd8469a33dca3797a7d3",
+      "184": "ced852cc60445076a223d9df3a34867cfc701dcc",
+      "124": "b29cdf0cddec5a3fc773e49ef991eaf43f0c3d24"
+    },
+    "python-attrs/attrs": {
+      "1327": "f5683b852b1e7ec1f26aabbb55aad332de79066d",
+      "1284": "c2824ac30f315bfbc7398960c6831d68ecc9edb4",
+      "1136": "d4934b14f13645a144224d2a8281820da568cbe6",
+      "804": "fe6eb3120013833d1927374eb5e826b72815a775"
+    },
+    "pallets/click": {
+      "3449": "c69643b60cf971cd5d8e5d3902632807ceab9b8f",
+      "3069": "b64ea07128a6368b5f6f93035c75d5693c7ba572",
+      "2416": "e234cf958d2416d4b20b53ae850c487fed32fa35",
+      "2246": "25a88794c10bb35e62802171af6346f9791da0f7"
+    },
+    "Textualize/rich": {
+      "3947": "079a6a5ec979cd28f75f7fc0940a19a37e81c512",
+      "3014": "6035a800ea647e8be15cfb3c30a20cc1c5b3639d"
+    },
+    "pallets/jinja": {
+      "1640": "824b4d3e5bb789cabd7cef74e57f4d802a7b2bfd",
+      "1633": "824b4d3e5bb789cabd7cef74e57f4d802a7b2bfd",
+      "1612": "1932ce3dc44e16394888cf04666d9b7a1795da76",
+      "1438": "e802be7520acec0d181ab442922ea11f986c3e4e"
+    }
+  }
+}

@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import builtins
 import difflib
+import importlib
 import json
 import re
 import sys
@@ -121,6 +122,33 @@ def _pick_block(issue: ParsedIssue, kind: str):
     return ordered[0] if ordered else None
 
 
+def _pytest_style(snippet: str) -> tuple[str, str, str | None]:
+    """A snippet that only *defines* ``test_`` functions does nothing when run as a script.
+
+    Call them ourselves when they take no arguments; otherwise they need pytest's fixtures.
+    """
+    plain = "python3 {test_file}"
+    try:
+        tree = ast.parse(snippet)
+    except (SyntaxError, ValueError):
+        return snippet, plain, None
+    tests = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test")]
+    classes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name.startswith("Test")]
+    if not tests and not classes:
+        return snippet, plain, None
+    called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    if any(t.name in called for t in tests) or "pytest" in called or "main" in called:
+        return snippet, plain, None  # the snippet already runs its own tests
+    needs_pytest = classes or any(
+        t.args.args or t.args.kwonlyargs or t.decorator_list or isinstance(t, ast.AsyncFunctionDef) for t in tests)
+    if needs_pytest:
+        return (snippet, "python3 -m pytest -q -x -p no:cacheprovider {test_file}",
+                "The snippet defines tests that need pytest (fixtures, parameters or classes), so it was run with pytest.")
+    calls = "\n".join(f"{t.name}()" for t in tests)
+    return (f"{snippet.rstrip()}\n\n# added: the snippet defines these tests but never calls them\n{calls}\n", plain,
+            "The snippet only defined test functions, so calls to them were added: " + ", ".join(f"`{t.name}()`" for t in tests) + ".")
+
+
 _PY_COMMAND = re.compile(r"^(?:python[\d.]*|py)\s+(?:-[A-Za-z]\s+)*[\w./\\-]+\.py\b[ \t]*(?P<args>.*)$")
 
 
@@ -134,8 +162,11 @@ def build_plan(issue: ParsedIssue, test_cmd: str | None = None, match: str | Non
 
     block = _pick_block(issue, "python")
     if block:
-        plan = ReproPlan("python-snippet", "python3 {test_file}", f"test_issue_{n}.py",
-                         _python_test(n, block.text), signature, uses_issue_code=True, snippet=block.text)
+        snippet, command, note = _pytest_style(block.text)
+        plan = ReproPlan("python-snippet", command, f"test_issue_{n}.py",
+                         _python_test(n, snippet), signature, uses_issue_code=True, snippet=snippet)
+        if note:
+            plan.notes.append(note)
         for command in issue.shell_commands:  # "python app.py --flag": keep the reporter's arguments
             m = _PY_COMMAND.match(command.strip())
             if m and m.group("args"):
@@ -239,13 +270,59 @@ def project_index(root: Path, max_files: int = 1500) -> tuple[set[str], dict[str
     return top, exports
 
 
-def resolve_imports(names: list[str], top: set[str], exports: dict[str, list[tuple[str, bool]]]) -> list[str]:
+# Names people use without importing, where the intent is not in doubt.
+_KNOWN_NAMES = {
+    **dict.fromkeys(("Any Optional Union List Dict Tuple Set FrozenSet Callable Iterable Iterator Sequence Mapping "
+                     "TypeVar Generic ClassVar Final Literal Protocol NamedTuple TypedDict Type Annotated cast overload "
+                     "TYPE_CHECKING").split(), "typing"),
+    **dict.fromkeys(("Path", "PurePath"), "pathlib"),
+    **dict.fromkeys(("OrderedDict", "defaultdict", "namedtuple", "Counter", "deque"), "collections"),
+    **dict.fromkeys(("Enum", "IntEnum", "auto"), "enum"),
+    **dict.fromkeys(("partial", "wraps", "lru_cache", "cached_property"), "functools"),
+    **dict.fromkeys(("StringIO", "BytesIO"), "io"),
+    **dict.fromkeys(("ABC", "abstractmethod"), "abc"),
+    **dict.fromkeys(("timedelta", "timezone", "date"), "datetime"),
+    "dataclass": "dataclasses", "Decimal": "decimal", "Fraction": "fractions",
+}
+
+
+def _usage(code: str) -> tuple[set[str], dict[str, set[str]]]:
+    """Names called directly, and the attributes read off each bare name."""
+    called: set[str] = set()
+    attrs: dict[str, set[str]] = {}
+    for node in ast.walk(ast.parse(code)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            attrs.setdefault(node.value.id, set()).add(node.attr)
+    return called, attrs
+
+
+def _stdlib_import(name: str, called: set[str], used: set[str]) -> str:
+    """``import datetime`` or ``from datetime import datetime``? Decide from how the name is used."""
+    try:
+        module = importlib.import_module(name)  # standard library only: safe to import
+    except Exception:
+        return f"import {name}"
+    member = getattr(module, name, None)
+    if member is not None and (name in called or any(not hasattr(module, a) and hasattr(member, a) for a in used)):
+        return f"from {name} import {name}"
+    return f"import {name}"
+
+
+def resolve_imports(names: list[str], top: set[str], exports: dict[str, list[tuple[str, bool]]], code: str = "") -> list[str]:
     lines = []
+    called, attrs = _usage(code) if code else (set(), {})
+    modules = {m for found in exports.values() for m, _ in found}
     for name in names:
         if name in top:
             lines.append(f"import {name}")
+            # "pkg.sub.thing" needs "import pkg.sub" unless the package imports the submodule itself.
+            lines += [f"import {name}.{a}" for a in sorted(attrs.get(name, ())) if f"{name}.{a}" in modules]
         elif name in sys.stdlib_module_names:
-            lines.append(f"import {name}")
+            lines.append(_stdlib_import(name, called, attrs.get(name, set())))
+        elif name not in exports and name in _KNOWN_NAMES:
+            lines.append(f"from {_KNOWN_NAMES[name]} import {name}")
         elif name in exports:
             # Prefer the public face: a top-level package that exposes the name, else the shallowest definition.
             public = [m for m, _ in exports[name] if m in top]
@@ -260,10 +337,20 @@ def complete_imports(plan: ReproPlan, worktree: str | Path) -> None:
     if plan.source != "python-snippet" or not plan.snippet:
         return
     names = missing_names(plan.snippet)
-    if not names:
-        return
     top, exports = project_index(Path(worktree))
-    lines = resolve_imports(names, top, exports)
+    lines = resolve_imports(names, top, exports, plan.snippet) if names else []
+    # "import pkg" followed by "pkg.sub.thing" fails unless the package imports that submodule itself.
+    try:
+        tree = ast.parse(plan.snippet)
+    except (SyntaxError, ValueError):
+        tree = None
+    if tree:
+        _, attrs = _usage(plan.snippet)
+        modules = {m for found in exports.values() for m, _ in found}
+        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names if not a.asname}
+        for name in sorted(imported & top):
+            lines += [f"import {name}.{a}" for a in sorted(attrs.get(name, ())) if f"{name}.{a}" in modules]
+    lines = list(dict.fromkeys(lines))
     if lines:
         number = int(re.search(r"\d+", plan.test_filename).group())
         plan.test_content = _python_test(number, plan.snippet, lines)
@@ -280,7 +367,7 @@ def materialise(plan: ReproPlan, repro_dir: Path, sandbox: str) -> str:
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_TYPED = re.compile(r"^\s*(?:Caused by:\s*|Uncaught\s+)?(?P<type>[A-Za-z_][\w.<>]*(?:Error|Exception|Failure|Exit|Interrupt))(?::[ \t]*(?P<msg>.*))?\s*$", re.M)
+_TYPED = re.compile(r"^\s*(?:Caused by:\s*|Uncaught\s+|E\s+|(?:FAILED|ERROR) \S+ - )?(?P<type>[A-Za-z_][\w.<>]*(?:Error|Exception|Failure|Exit|Interrupt))(?::[ \t]*(?P<msg>.*))?\s*$", re.M)
 _NOISE = re.compile(r"0x[0-9a-fA-F]+|\d+|(?:[A-Za-z]:)?[/\\][\w./\\-]+|\b[\w.]+\.(?=[\w<]+\()|<locals>\.")
 
 

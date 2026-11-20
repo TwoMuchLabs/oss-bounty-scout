@@ -178,6 +178,30 @@ class PlanTests(RepoCase):
             self.assertIn(line, result.plan.test_content)
         self.assertIn("Added imports the snippet left out", " ".join(result.notes))
 
+    def test_common_names_and_submodules_are_imported(self):
+        from bounty_scout.repro import resolve_imports
+        code = "p = Path('.')\nx: Optional[int] = None\nprint(datetime.now(), os.sep, pkg.sub.thing, time())"
+        lines = resolve_imports(missing_names(code), {"pkg"}, {"thing": [("pkg.sub", True)]}, code)
+        self.assertEqual(lines, ["from pathlib import Path", "from typing import Optional", "from datetime import datetime",
+                                 "import os", "import pkg", "import pkg.sub", "from time import time"])
+        # a project that exports the same name wins over the standard-library guess
+        self.assertEqual(resolve_imports(["Path"], {"pkg"}, {"Path": [("pkg", True)]}, "Path()"), ["from pkg import Path"])
+
+    def test_snippet_that_only_defines_tests_gets_them_called(self):
+        body = "```python\nfrom statskit import mean\n\ndef test_empty():\n    assert mean([]) == 0.0\n```\n\n```\nFAILED t.py::test_empty - ZeroDivisionError: division by zero\n```"
+        issue = parse_issue(fixture.issue(body=body))
+        self.assertEqual(issue.error_signature, "ZeroDivisionError: division by zero")
+        result = triage(self.repo, fixture.issue(body=body), options=Options(bisect=False))
+        self.assertEqual(result.status, "reproduced", result.head.result.output)
+        self.assertIn("test_empty()\n", result.plan.test_content)
+
+    def test_tests_that_need_fixtures_are_run_with_pytest(self):
+        plan = self.plan_for("```python\ndef test_x(tmp_path):\n    assert 0\n```\n\nAssertionError")
+        self.assertEqual(plan.command, "python3 -m pytest -q -x -p no:cacheprovider {test_file}")
+        own = self.plan_for("```python\ndef test_x():\n    assert 0\ntest_x()\n```\n\nAssertionError")
+        self.assertEqual(own.command, "python3 {test_file}")
+        self.assertNotIn("# added", own.test_content)
+
     def test_missing_module_is_explained(self):
         body = "```python\nimport not_installed_anywhere\n```\n\nKeyError: 'x'"
         result = triage(self.repo, fixture.issue(body=body))
@@ -304,7 +328,48 @@ class TriageTests(RepoCase):
         result = triage(self.repo, fixture.issue(body="spread([]) fails"), options=opts)
         self.assertEqual(result.status, "reproduced")
         self.assertIsNone(result.bisect)
-        self.assertIn("No known-good commit was found", result.notes[0])
+        self.assertEqual(result.regression, "no")
+        self.assertIn("Probably not a regression", result.notes[0])
+        self.assertIn("Probably not: already fails at", render(result))
+
+    def test_regression_is_unknown_when_no_older_version_can_run(self):
+        # The helper module only exists from the culprit onwards, so every older version fails differently.
+        work = Path(tempfile.mkdtemp(prefix="scout-unk-"))
+        repo = work / "r"
+        fixture._git(work, "init", "-q", "-b", "main", str(repo))
+        fixture._commit(repo, "one", {"pkg/__init__.py": ""})
+        fixture._commit(repo, "two", {"pkg/tool.py": "def run():\n    raise KeyError('boom')\n"})
+        body = "```python\nfrom pkg.tool import run\nrun()\n```\n\nKeyError: 'boom'"
+        result = triage(repo, fixture.issue(body=body))
+        self.assertEqual((result.status, result.regression), ("reproduced", "unknown"))
+        self.assertIn("No earlier version could be tested", " ".join(result.notes))
+
+    def test_one_hunk_of_the_culprit_is_undone_when_the_whole_file_no_longer_reverts(self):
+        work = Path(tempfile.mkdtemp(prefix="scout-hunk-"))
+        repo = work / "r"
+        filler = "".join(f"# line {i}\n" for i in range(30))
+        good = "def mean(values):\n    if not values:\n        return 0.0\n    return sum(values) / len(values)\n\n" + filler + "LIMIT = 10\n"
+        fixture._git(work, "init", "-q", "-b", "main", str(repo))
+        fixture._commit(repo, "start", {"pkg/__init__.py": "from .core import mean\n", "pkg/core.py": good})
+        fixture._git(repo, "tag", "v1")
+        broken = good.replace("    if not values:\n        return 0.0\n", "").replace("LIMIT = 10", "LIMIT = 20")
+        culprit = fixture._commit(repo, "tidy", {"pkg/core.py": broken})
+        fixture._commit(repo, "raise limit", {"pkg/core.py": broken.replace("LIMIT = 20", "LIMIT = 30")})
+        body = "```python\nfrom pkg import mean\nmean([])\n```\n\nZeroDivisionError: division by zero"
+        result = triage(repo, fixture.issue(body=body))
+        self.assertEqual(result.bisect.culprit.sha, culprit)
+        self.assertEqual((result.fix.scope, result.fix.status), ("hunk", "verified"))
+        self.assertIn("+    if not values:", result.fix.diff)
+        self.assertNotIn("LIMIT", result.fix.diff)
+        self.assertIn("undoes one part of the culprit's change", render(result))
+
+    def test_type_checker_reports_are_not_run(self):
+        body = "```python\nimport statskit\nx: int = statskit.mean([1])\n```\n\n```\nt.py:2: error: Incompatible types in assignment  [assignment]\n```\nmypy 1.8"
+        result = triage(self.repo, fixture.issue(body=body))
+        self.assertEqual(result.status, "unsupported")
+        self.assertIn("Not something this tool can run", render(result))
+        with_cmd = triage(self.repo, fixture.issue(body=body), options=Options(test_cmd="true", bisect=False))
+        self.assertEqual(with_cmd.status, "not-reproduced")
 
 
 class CliTests(RepoCase):

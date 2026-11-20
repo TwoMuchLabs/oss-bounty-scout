@@ -1,4 +1,5 @@
 # Replays closed issues from public projects through the scout, in the Docker sandbox.
+# Runs on every change to the tool and fails if a culprit it used to find is lost (fieldtest/golden.json).
 # See fieldtest/field_test.py for how results are scored.
 name: Field test
 
@@ -21,7 +22,7 @@ on:
         default: "80"
   push:
     branches: [main]
-    paths: ["fieldtest/**", ".github/workflows/field-test.yml"]
+    paths: ["src/**", "fieldtest/**", ".github/workflows/field-test.yml"]
 
 permissions:
   contents: read
@@ -70,9 +71,11 @@ jobs:
           OPENAI_API_KEY: ${{ inputs.ai == 'openai' && secrets.OPENAI_API_KEY || '' }}
           AI_MODEL: ${{ inputs.ai_model }}
         run: |
+          status=0
           python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --image scout-field \
-            --limit "${{ inputs.limit || '80' }}" --ai "${{ inputs.ai || 'off' }}" --ai-model "$AI_MODEL"
+            --limit "${{ inputs.limit || '80' }}" --ai "${{ inputs.ai || 'off' }}" --ai-model "$AI_MODEL" || status=$?
           cat "$RUNNER_TEMP/out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          exit $status  # non-zero when a culprit in fieldtest/golden.json was lost or changed
       - name: Artifact name
         if: always()
         run: echo "SAFE_NAME=$(echo '${{ matrix.repo }}' | tr '/' '-')" >> "$GITHUB_ENV"

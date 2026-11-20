@@ -39,7 +39,7 @@ class Suspect:
 @dataclass
 class Fix:
     diff: str
-    scope: str  # "file" (revert of the culprit's change to one file) | "commit" (full revert) | "ai" (model-written)
+    scope: str  # "hunk" (one hunk of the culprit's change undone) | "file" | "commit" (full revert) | "ai" (model-written)
     status: str  # "verified" | "still-fails" | "does-not-apply" | "unverified"
 
 
@@ -144,12 +144,39 @@ def suggest_fix(repo: str | Path, culprit: str, bad: str, suspect: Suspect | Non
             continue
         if not spec:
             return Fix(diff, scope, "unverified")
+        if scope == "file":
+            # Smallest first: undoing one hunk of the culprit's change is a better lead than undoing the file.
+            hunks = split_hunks(diff)
+            if len(hunks) > 1:
+                near = suspect.line or 0
+                for _, hunk in sorted(hunks, key=lambda h: abs(h[0] - near))[:MAX_HUNK_TRIES]:
+                    status, applied = _verify(repo, bad, hunk, spec)
+                    if status == "verified":
+                        return Fix(applied, "hunk", status)
         status, applied = _verify(repo, bad, diff, spec)
         fix = Fix(applied or diff, scope, status)
         if status == "verified":
             return fix
         first = first or fix
     return first
+
+
+MAX_HUNK_TRIES = 6
+_HUNK_OLD = re.compile(r"^@@ -(\d+)")
+
+
+def split_hunks(diff: str) -> list[tuple[int, str]]:
+    """Split a one-file diff into stand-alone single-hunk patches: (line in the current file, patch)."""
+    lines = diff.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.startswith("@@ ")]
+    if not starts:
+        return []
+    header = "".join(lines[: starts[0]])
+    out = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(lines)
+        out.append((int(_HUNK_OLD.match(lines[start]).group(1)), header + "".join(lines[start:end])))
+    return out
 
 
 def _verify(repo: str | Path, bad: str, diff: str, spec: CheckSpec) -> tuple[str, str | None]:

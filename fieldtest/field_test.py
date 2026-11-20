@@ -111,7 +111,7 @@ def cmd_run(args) -> int:
                 continue
             result = triage(repo, raw, cfg, Options(bad=bad, trust_issue_code=args.sandbox == "worktree"))
             (out / "reports" / f"issue-{n}.md").write_text(render(result))
-            row.update(status=result.status, bad=bad, good=result.good_ref,
+            row.update(status=result.status, bad=bad, good=result.good_ref, regression=result.regression,
                        signature=result.issue.error_signature,
                        head_reason=result.head.reason if result.head else None,
                        head_tail=result.head.result.output.strip().splitlines()[-2:] if result.head else None)
@@ -152,11 +152,23 @@ def cmd_run(args) -> int:
         rows.append(row)
         print("ROW " + json.dumps(row), flush=True)  # the log is the record; artifacts carry the full reports
 
+    golden = json.loads((Path(__file__).parent / "golden.json").read_text())["culprits"].get(data["repo"], {})
+    lost = []
+    by_issue = {str(r["issue"]): r for r in rows}
+    for number, culprit in golden.items():
+        got = by_issue.get(number, {}).get("culprit")
+        if got != culprit and len(rows) < len(data["candidates"]) and number not in by_issue:
+            continue  # this run was limited and never reached the issue
+        if got != culprit:
+            lost.append(f"#{number}: expected {culprit[:10]}, got {(got or by_issue.get(number, {}).get('status') or 'not replayed')[:14]}")
     summary = summarise(data, rows)
+    summary["golden_expected"], summary["golden_lost"] = len(golden), len(lost)
     (out / "results.json").write_text(json.dumps({"repo": data["repo"], "summary": summary, "rows": rows}, indent=2))
     (out / "summary.md").write_text(markdown(data["repo"], summary, rows))
     print("SUMMARY " + json.dumps({"repo": data["repo"], **summary}))
-    return 0
+    for line in lost:
+        print(f"GOLDEN LOST {data['repo']} {line}")
+    return 1 if lost and args.ai == "off" else 0
 
 
 def summarise(data: dict, rows: list[dict]) -> dict:
@@ -168,16 +180,22 @@ def summarise(data: dict, rows: list[dict]) -> dict:
         "not_reproduced": count(lambda r: r.get("status") == "not-reproduced"),
         "inconclusive": count(lambda r: r.get("status") == "inconclusive"),
         "errors": count(lambda r: r.get("status") == "error"),
-        "reproduced_and_real_fix_passes": count(lambda r: r.get("after_fix") == "not-reproduced"),
-        "reproduced_but_still_fails_after_fix": count(lambda r: r.get("after_fix") == "reproduced"),
+        # Only issues closed by a commit we can identify give a trustworthy "after": otherwise we are guessing by date.
+        "reproduced_with_known_fix": count(lambda r: r.get("status") == "reproduced" and r.get("fix_commit") and r.get("after_fix")),
+        "known_fix_makes_test_pass": count(lambda r: r.get("fix_commit") and r.get("after_fix") == "not-reproduced"),
+        "known_fix_still_fails": count(lambda r: r.get("fix_commit") and r.get("after_fix") == "reproduced"),
+        "regression_yes": count(lambda r: r.get("regression") == "yes"),
+        "regression_no": count(lambda r: r.get("regression") == "no"),
+        "regression_unknown": count(lambda r: r.get("regression") == "unknown"),
+        "unsupported_type_check": count(lambda r: r.get("status") == "unsupported"),
         "culprit_found": count(lambda r: r.get("bisect") == "found"),
         "culprit_ambiguous": count(lambda r: r.get("bisect") == "ambiguous"),
         "bisect_abandoned": count(lambda r: r.get("bisect") in ("abandoned", "failed")),
-        "no_good_baseline": count(lambda r: r.get("status") == "reproduced" and not r.get("bisect")),
         "culprit_named_in_thread": count(lambda r: r.get("culprit_in_thread")),
         "suspect_file_scored": count(lambda r: "suspect_in_fix" in r),
         "suspect_file_matches_fix": count(lambda r: r.get("suspect_in_fix")),
         "patch_verified": count(lambda r: r.get("patch") == "verified"),
+        "patch_verified_single_hunk": count(lambda r: r.get("patch") == "verified" and r.get("patch_scope") == "hunk"),
         "ai_test_accepted": count(lambda r: r.get("test_source") == "ai-test"),
         "ai_patch_verified": count(lambda r: r.get("patch_scope") == "ai" and r.get("patch") == "verified"),
         "ai_calls": sum(r.get("ai_calls") or 0 for r in rows),

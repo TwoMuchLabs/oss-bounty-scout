@@ -32,11 +32,14 @@ _JS_LANGS = {"js", "javascript", "node", "mjs", "cjs"}
 
 # "ValueError: bad thing", "java.lang.IllegalStateException: ...", "TypeError: x is not a function"
 _TYPED_ERROR = re.compile(
-    r"^\s*(?:Caused by:\s*|Uncaught\s+)?(?P<type>[A-Za-z_][\w.]*(?:Error|Exception|Failure|Exit|Interrupt))(?::\s*(?P<msg>.*))?\s*$",
+    r"^\s*(?:Caused by:\s*|Uncaught\s+|E\s+|(?:FAILED|ERROR) \S+ - )?(?P<type>[A-Za-z_][\w.]*(?:Error|Exception|Failure|Exit|Interrupt))(?::[ \t]*(?P<msg>.*))?\s*$",
     re.M,
 )
 _PANIC = re.compile(r"^\s*(?P<line>(?:panic:|thread '.*?' panicked at|fatal error:|Segmentation fault).*)$", re.M)
 _GENERIC_ERROR = re.compile(r"^\s*(?P<line>(?:\w+: )?(?:error|ERROR|Error|FAILED|fatal)\b[: ].+)$", re.M)
+
+# mypy / pyright style output: "pkg/mod.py:12: error: Argument 1 ..." or a bare "error: ... [arg-type]"
+_TYPE_CHECK = re.compile(r"^\S+\.pyi?:\d+(?::\d+)?:\s*(?:error|note):|^\s*error:.*\[[a-z-]+\]\s*$|\b(?:mypy|pyright|pylance|reveal_type)\b", re.M | re.I)
 
 _PY_FRAME = re.compile(r'File "(?P<file>[^"]+)", line (?P<line>\d+)')
 _GENERIC_FRAME = re.compile(r"(?P<file>(?:[A-Za-z]:)?[\w./\\@+-]+\.[A-Za-z]{1,5}):(?P<line>\d+)\b")
@@ -103,6 +106,7 @@ class ParsedIssue:
     expected: str = ""
     actual: str = ""
     missing: list[str] = field(default_factory=list)
+    kind: str = "runtime"  # "type-check" when the report is about a type checker's output, not about running code
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -288,6 +292,11 @@ def parse_issue(raw: dict) -> ParsedIssue:
     text = f"{issue.title}\n{body}"
     issue.good_hints = _dedupe([m.group("ref") for m in _GOOD_HINT.finditer(text)])
     issue.bad_hints = _dedupe([m.group("ref") for m in _BAD_HINT.finditer(text) if m.group("ref") not in issue.good_hints])
+
+    signature = issue.error_signature or ""
+    if not _TYPED_ERROR.match(signature) and _TYPE_CHECK.search("\n".join(issue.error_logs) or body) and (
+            signature.lower().startswith("error:") or re.search(r"\.pyi?:\d+(?::\d+)?:\s*error:", body)):
+        issue.kind = "type-check"
 
     runnable = [b for b in issue.code_blocks if b.kind in ("python", "javascript")] or issue.shell_commands
     if not runnable:

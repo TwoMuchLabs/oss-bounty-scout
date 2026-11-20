@@ -12,6 +12,7 @@ _STATUS = {
     "inconclusive": "Inconclusive",
     "needs-info": "Needs more information",
     "needs-approval": "Waiting for maintainer approval",
+    "unsupported": "Not something this tool can run",
 }
 _FIX_STATUS = {
     "verified": "Verified: with this patch applied to `{bad}`, the reproduction passes.",
@@ -55,6 +56,8 @@ def render(r: TriageResult) -> str:
         rows.append(("Bisect range", f"`{b.good}` (good) → `{bad}` (bad): {b.commits_in_range} commits, {len(b.steps)} tested"))
     elif b and b.status == "ambiguous":
         rows.append(("Introduced by", "One of: " + ", ".join(f"`{c.short}`" for c in b.candidates)))
+    elif r.regression == "no":
+        rows.append(("Regression", f"Probably not: already fails at `{r.oldest_failing}`, the oldest version that could be tested"))
     elif r.status == "reproduced":
         rows.append(("Introduced by", "Not determined"))
     if r.suspect:
@@ -77,7 +80,8 @@ def render(r: TriageResult) -> str:
             "", _fence(r.fix.diff, "diff"), "",
         ]
     elif r.fix:
-        scope = f"reverts the culprit's change to `{r.suspect.file}`" if r.fix.scope == "file" and r.suspect else "reverts the culprit commit"
+        scope = {"hunk": f"undoes one part of the culprit's change to `{r.suspect.file}`" if r.suspect else "",
+                 "file": f"reverts the culprit's change to `{r.suspect.file}`" if r.suspect else ""}.get(r.fix.scope) or "reverts the culprit commit"
         out += [
             "### Suggested fix", "",
             f"Candidate patch ({scope}). It restores the previous behaviour; it is a starting point, not a reviewed fix.",
