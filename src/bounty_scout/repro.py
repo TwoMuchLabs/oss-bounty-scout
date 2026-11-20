@@ -228,31 +228,33 @@ _SKIP_DIRS = {"tests", "test", "testing", "docs", "doc", "examples", "example", 
 _SKIP_MODULES = {"setup", "conftest", "noxfile", "tasks", "fabfile"}
 
 
+def _binds(node: ast.AST) -> list[str]:
+    """The names one node of the syntax tree binds."""
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [(a.asname or a.name).split(".")[0] for a in node.names]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return [node.id]
+    if isinstance(node, ast.arg):
+        return [node.arg]
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+        return [node.name]
+    if isinstance(node, ast.MatchMapping) and node.rest:
+        return [node.rest]
+    return []
+
+
 def missing_names(code: str) -> list[str]:
     """Names the snippet reads but never binds (and that are not builtins), in first-use order."""
     try:
-        tree = ast.parse(code)
+        nodes = list(ast.walk(ast.parse(code)))
     except (SyntaxError, ValueError):
         return []
-    bound: set[str] = set(dir(builtins))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
-            return []  # a star import could bind anything
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            bound.update((a.asname or a.name).split(".")[0] for a in node.names)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(node.name)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            bound.add(node.id)
-        elif isinstance(node, ast.arg):
-            bound.add(node.arg)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            bound.add(node.name)
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
-            bound.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            bound.add(node.rest)
-    loads = sorted((n for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)),
+    if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in nodes):
+        return []  # a star import could bind anything
+    bound = set(dir(builtins)).union(*map(_binds, nodes))
+    loads = sorted((n for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)),
                    key=lambda n: (n.lineno, n.col_offset))
     return [name for name in dict.fromkeys(n.id for n in loads) if name not in bound]
 
