@@ -268,7 +268,7 @@ def snap_text_functions(issues: list[dict], trees: list[Path], snap: dict) -> No
 # Reported errors and outputs for the corners of match_kind() that no recorded issue reaches.
 MATCH_CORNERS = [
     ("Token.Name.Exception", "x\nToken.Name.Exception\n"), ("ValueError", "ValueError: boom"), ("pkg.CustomError", "E   pkg.CustomError\n"),
-    ("Error: one two", "Error: two one"), ("ValueError: alpha beta gamma delta epsilon zeta eta", "ValueError: eta zeta epsilon delta gamma beta alpha"),
+    ("ValueError: one two", "ValueError: two one"), ("ValueError: alpha beta gamma delta epsilon zeta eta", "ValueError: eta zeta epsilon delta gamma beta alpha"),
     ("AssertionError: assert 1 == 2", "AssertionError\n"), ("AssertionError: boom", "AssertionError\n"), ("KeyError: 'a'", "KeyError: 'b'"),
     ("KeyError: 'a'", "\x1b[31mKeyError\x1b[0m: 'a' extra"), ("os.error: [Errno 2] No such file: '/tmp/x'", "FileNotFoundError: [Errno 2] No such file: '/home/y'"),
 ]
