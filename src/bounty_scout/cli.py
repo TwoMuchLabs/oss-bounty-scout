@@ -60,6 +60,32 @@ def cmd_parse(args) -> int:
     return 0
 
 
+def _options(args) -> Options:
+    return Options(
+        good=args.good, bad=args.bad, test_cmd=args.test_cmd, setup_cmd=args.setup_cmd, match=args.match,
+        timeout=args.timeout, sandbox=args.sandbox, trust_issue_code=args.trust_issue_code,
+        first_parent=args.first_parent, bisect=not args.no_bisect,
+        ai="command" if args.ai_cmd and not args.ai else args.ai, ai_model=args.ai_model, ai_cmd=args.ai_cmd, ai_base_url=args.ai_base_url,
+    )
+
+
+def _save(out_dir: Path, number, result) -> str:
+    """Write the report and its machine-readable summary; say on stderr what was found. Returns the report."""
+    report = render(result)
+    path = out_dir / f"issue-{number}.md"
+    path.write_text(report)
+    culprit = result.bisect.culprit.sha if result.bisect and result.bisect.culprit else None
+    (out_dir / f"issue-{number}.json").write_text(json.dumps({
+        "issue": number, "status": result.status, "bad": result.bad_sha, "good": result.good_ref,
+        "culprit": culprit, "suspect": result.suspect.location if result.suspect else None,
+        "fix_status": result.fix.status if result.fix else None,
+        "fix_scope": result.fix.scope if result.fix else None,
+        "ai": result.ai_label, "ai_calls": result.ai_calls, "ai_test": result.ai_test_gate,
+    }, indent=2))
+    print(f"#{number}: {result.status}" + (f", introduced by {culprit[:10]}" if culprit else "") + f" -> {path}", file=sys.stderr)
+    return report
+
+
 def cmd_triage(args) -> int:
     repo_path = Path(args.repo_path).resolve()
     if git(repo_path, "rev-parse", "--git-dir", check=False).returncode != 0:
@@ -67,12 +93,7 @@ def cmd_triage(args) -> int:
     if args.publish:
         _require_repo(args)  # fail before doing the work, not after
     cfg = config_mod.load(repo_path)
-    opts = Options(
-        good=args.good, bad=args.bad, test_cmd=args.test_cmd, setup_cmd=args.setup_cmd, match=args.match,
-        timeout=args.timeout, sandbox=args.sandbox, trust_issue_code=args.trust_issue_code,
-        first_parent=args.first_parent, bisect=not args.no_bisect,
-        ai="command" if args.ai_cmd and not args.ai else args.ai, ai_model=args.ai_model, ai_cmd=args.ai_cmd, ai_base_url=args.ai_base_url,
-    )
+    opts = _options(args)
     issues = _collect_issues(args)
     if not issues:
         print("no new issues to triage", file=sys.stderr)
@@ -89,18 +110,7 @@ def cmd_triage(args) -> int:
             print(f"#{number}: triage failed: {exc}", file=sys.stderr)
             failures += 1
             continue
-        report = render(result)
-        path = out_dir / f"issue-{number}.md"
-        path.write_text(report)
-        culprit = result.bisect.culprit.sha if result.bisect and result.bisect.culprit else None
-        (out_dir / f"issue-{number}.json").write_text(json.dumps({
-            "issue": number, "status": result.status, "bad": result.bad_sha, "good": result.good_ref,
-            "culprit": culprit, "suspect": result.suspect.location if result.suspect else None,
-            "fix_status": result.fix.status if result.fix else None,
-            "fix_scope": result.fix.scope if result.fix else None,
-            "ai": result.ai_label, "ai_calls": result.ai_calls, "ai_test": result.ai_test_gate,
-        }, indent=2))
-        print(f"#{number}: {result.status}" + (f", introduced by {culprit[:10]}" if culprit else "") + f" -> {path}", file=sys.stderr)
+        report = _save(out_dir, number, result)
         if len(issues) == 1 and not args.quiet:
             print(report)
         if args.publish:
