@@ -12,8 +12,9 @@ from pathlib import Path
 from .repro import BAD, EXIT_CODES, GOOD, CheckSpec, Verdict, evaluate
 from .runner import GitError, Worktree, git
 
-_FIRST_BAD = re.compile(r"^([0-9a-f]{40}) is the first bad commit", re.M)
-_SHA_LINE = re.compile(r"^([0-9a-f]{40})$", re.M)
+# git < 2.4x prints "is the first bad commit"; newer releases quote the term: "is the first 'bad' commit".
+_FIRST_BAD = re.compile(r"^([0-9a-f]{40,64}) is the first '?bad'? commit", re.M)
+_SHA_LINE = re.compile(r"^([0-9a-f]{40,64})$", re.M)
 
 # ``git bisect run`` invokes this with the worktree as cwd. ``-I`` keeps the
 # repository under test from shadowing our modules.

@@ -83,6 +83,13 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify(RunResult(0, "", True, 0), None)[0], SKIP)
 
 
+class BisectOutputTests(unittest.TestCase):
+    def test_first_bad_line_from_old_and_new_git(self):
+        sha = "96b27637b5e6c46ea13e261418e2192005d7f7fb"
+        for line in (f"{sha} is the first bad commit", f"{sha} is the first 'bad' commit"):
+            self.assertEqual(bisect_mod._FIRST_BAD.search(f"running x\n{line}\ncommit {sha}").group(1), sha)
+
+
 class BisectTests(RepoCase):
     CHECK = "python3 -c 'import statskit; statskit.mean([])'"
 
