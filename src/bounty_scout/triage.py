@@ -263,6 +263,19 @@ def _run(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai) -> 
             )
         return
     result.status = "reproduced"
+    # The exact reported line appeared here, so in this environment nothing needs rewording tolerance:
+    # from now on (baseline, bisect, checking a fix) only that line counts, not a similar message.
+    spec.strict = head.reason.startswith("reported error present")
+    if not head_frames and plan.source in ("python-snippet", "ai-test"):
+        result.notes.append(
+            "The error is raised without passing through the project's own files: it comes from the snippet itself "
+            "or from a library. Check that this is a bug in the project before acting on it."
+        )
+    if "PackageNotFoundError" in head.result.output:
+        result.notes.append(
+            "The failure mentions missing package metadata. The project is run from its source tree here, not installed; "
+            "if that matters for this bug, set `setup = \"pip install -e .\"`."
+        )
 
     if opts.bisect:
         _trace(repo, result, issue, cfg, opts, spec, head_frames)

@@ -160,6 +160,26 @@ class MatchingTests(unittest.TestCase):
         got = "marshmallow.exceptions.ValidationError: {'iban_data': {'deposit_bank_account_id': ['Missing data for required field.'], 'auto_withdrawal_bank_account_id': ['Missing data for required field.']}}"
         self.assertTrue(error_matches(want, None, got))
 
+    def test_false_positives_found_in_the_field(self):
+        # a different name is a different error (tqdm #872, isort #2723)
+        self.assertFalse(error_matches("NameError: name 'IProgress' is not defined", None, "NameError: name 'tfds' is not defined"))
+        self.assertFalse(error_matches("ModuleNotFoundError: No module named 'os.parse'; 'os' is not a package", None,
+                                       "ModuleNotFoundError: No module named 'http.parse'"))
+        # text that merely ends in "Exception" is not an exception (pygments #1816)
+        self.assertIsNone(parse_issue(fixture.issue(body="```\nToken.Name.Exception\nToken.Text\n```")).error_signature)
+        self.assertFalse(error_matches("Token.Name.Exception", None, "Token.Name.Exception\nToken.Text.Whitespace"))
+        # logging output is not an error report (tqdm #1581)
+        self.assertIsNone(parse_issue(fixture.issue(body="```\nERROR:main:outside redirect -- filter\n```")).error_signature)
+        self.assertEqual(parse_issue(fixture.issue(body="```\nerror: unknown option '--x'\n```")).error_signature,
+                         "error: unknown option '--x'")
+
+    def test_once_the_reported_line_is_seen_look_alikes_stop_counting(self):
+        want = "ParseException: Expected identifier, found '1'"
+        pattern = signature_pattern(want)
+        fixed = RunResult(1, "pyparsing.exceptions.ParseException: Expected custom identifier, found '1'", False, 0)
+        self.assertEqual(classify(fixed, pattern, want)[0], BAD)  # tolerant: could be the same bug, reworded
+        self.assertEqual(classify(fixed, pattern, want, strict=True)[0], SKIP)  # strict: the reported message is gone
+
     def test_a_different_error_is_not_a_match(self):
         self.assertFalse(error_matches("KeyError: 'a'", None, "NameError: name 'click' is not defined"))
         self.assertFalse(error_matches("TypeError: 'int' object is not iterable", None,
@@ -224,6 +244,25 @@ class PlanTests(RepoCase):
         self.assertEqual(own.command, "python3 {test_file}")
         self.assertNotIn("# added", own.test_content)
 
+    def test_ipython_transcript_and_version_boilerplate(self):
+        body = ("```python\nimport statskit, sys\nprint(statskit.__name__, sys.version, sys.platform)\n```\n\n"
+                "```\nIn [1]: from statskit import mean\n\nIn [2]: for x in [[]]:\n   ...:     mean(x)\n   ...:\n"
+                "---------------------------------------------------------------------------\n"
+                "ZeroDivisionError                         Traceback (most recent call last)\n"
+                "ZeroDivisionError: division by zero\n```")
+        plan = self.plan_for(body)
+        self.assertEqual(plan.snippet.strip(), "from statskit import mean\nfor x in [[]]:\n    mean(x)")
+        result = triage(self.repo, fixture.issue(body=body), options=Options(bisect=False))
+        self.assertEqual(result.status, "reproduced", result.head.result.output)
+
+    def test_error_that_never_touches_the_project_is_flagged(self):
+        body = "```python\nimport statskit\nimport random\nrandom.sample(range(3), k=9)\n```\n\nValueError: Sample larger than population or is negative"
+        result = triage(self.repo, fixture.issue(body=body), options=Options(bisect=False))
+        self.assertEqual(result.status, "reproduced")
+        self.assertIn("without passing through the project's own files", " ".join(result.notes))
+        clean = triage(self.repo, fixture.issue(), options=Options(bisect=False))
+        self.assertNotIn("without passing through", " ".join(clean.notes))
+
     def test_missing_module_is_explained(self):
         body = "```python\nimport not_installed_anywhere\n```\n\nKeyError: 'x'"
         result = triage(self.repo, fixture.issue(body=body))
@@ -260,6 +299,14 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(result.suspect.file, "index.js")
         self.assertEqual(result.fix.status, "verified")
         self.assertEqual(git(self.repo, "status", "--porcelain").stdout, "")
+
+    def test_import_style_snippet(self):
+        body = self.BODY.replace("const tiny = require('tinylib');", "import tiny from 'tinylib';").replace(
+            "const { two } = require('tinylib/lib/extra');", "import extra from 'tinylib/lib/extra.js';\nconst { two } = extra;")
+        result = triage(self.repo, fixture.issue(body=body))
+        self.assertTrue(result.plan.test_filename.endswith(".mjs"))
+        self.assertEqual(result.status, "reproduced", result.head and result.head.result.output)
+        self.assertEqual(result.bisect.culprit.sha, self.culprit)
 
     def test_unlabelled_javascript_is_recognised(self):
         body = self.BODY.replace("```js", "```")

@@ -36,7 +36,23 @@ _TYPED_ERROR = re.compile(
     re.M,
 )
 _PANIC = re.compile(r"^\s*(?P<line>(?:panic:|thread '.*?' panicked at|fatal error:|Segmentation fault).*)$", re.M)
-_GENERIC_ERROR = re.compile(r"^\s*(?P<line>(?:\w+: )?(?:error|ERROR|Error|FAILED|fatal)\b[: ].+)$", re.M)
+# "ERROR:root:message" is Python's logging format: ordinary program output, not an error report.
+_GENERIC_ERROR = re.compile(r"^\s*(?P<line>(?:\w+: )?(?:error|ERROR|Error|FAILED|fatal)\b(?!:[\w.]+:)[: ].+)$", re.M)
+_BUILTIN_BARE = {"Exception", "BaseException", "SystemExit", "KeyboardInterrupt", "GeneratorExit", "StopIteration"}
+
+
+def plausible_exception(name: str, message: str | None) -> bool:
+    """Is ``name`` an exception class, or just text that ends like one ("Token.Name.Exception")?
+
+    With a message after the colon there is little doubt. A bare name must look
+    like ``module.path.SomeError``: lowercase module parts, then a class name.
+    """
+    if message:
+        return True
+    *modules, cls = name.split(".")
+    if any(part[:1].isupper() for part in modules):
+        return False
+    return cls in _BUILTIN_BARE or (cls[:1].isupper() and cls not in ("Error", "Failure", "Exit", "Interrupt"))
 
 # mypy / pyright style output: "pkg/mod.py:12: error: Argument 1 ..." or a bare "error: ... [arg-type]"
 _TYPE_CHECK = re.compile(r"^\S+\.pyi?:\d+(?::\d+)?:\s*(?:error|note):|^\s*error:.*\[[a-z-]+\]\s*$|\b(?:mypy|pyright|pylance|reveal_type)\b", re.M | re.I)
@@ -160,6 +176,23 @@ def _split_repl(text: str) -> tuple[str, str]:
     return "\n".join(code).strip(), "\n".join(output).strip()
 
 
+def _split_ipython(text: str) -> tuple[str, str]:
+    """Split an IPython/Jupyter transcript ("In [1]: ...", "   ...: ...", "Out[1]: ...") into code and output."""
+    code, output, in_code = [], [], False
+    for line in text.splitlines():
+        start = re.match(r"^In \[\d+\]: ?(.*)$", line)
+        cont = re.match(r"^\s+\.\.\.: ?(.*)$", line)
+        if start:
+            code.append(start.group(1))
+            in_code = True
+        elif cont and in_code:
+            code.append(cont.group(1))
+        else:
+            in_code = False
+            output.append(re.sub(r"^Out\[\d+\]: ?", "", line))
+    return "\n".join(code).strip(), "\n".join(output).strip()
+
+
 def _classify(lang: str, text: str, section: str) -> str:
     lang = lang.lower()
     if lang in _LOG_LANGS:
@@ -194,7 +227,7 @@ def extract_signature(texts: list[str]) -> str | None:
             short = _PYTEST_ASSERT.search(text)  # pytest's summary drops the "AssertionError:" prefix
             if short:
                 return f"AssertionError: {short.group(1).strip()}"
-        typed = list(_TYPED_ERROR.finditer(text))
+        typed = [m for m in _TYPED_ERROR.finditer(text) if plausible_exception(m.group("type"), m.group("msg"))]
         if typed:
             m = typed[-1]  # last one is the root cause in Python and Java chains
             msg = (m.group("msg") or "").strip()
@@ -325,6 +358,12 @@ def _add_block(issue: ParsedIssue, lang: str, text: str, section: str) -> None:
     if not text.strip():
         return
     kind = _classify(lang, text, section)
+    if kind in ("python", "unknown", "log") and re.search(r"^In \[\d+\]: ", text, re.M):
+        code, output = _split_ipython(text)
+        if code:
+            issue.code_blocks.append(CodeBlock(lang or "python", code, section, "python"))
+            issue.error_logs.append(output)
+            return
     if kind in ("python", "unknown", "log") and re.search(r"^>>> ", text, re.M):
         code, output = _split_repl(text)
         if code:

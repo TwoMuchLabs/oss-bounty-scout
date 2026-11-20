@@ -20,7 +20,7 @@ _FIX_STATUS = {
     "does-not-apply": "Not verified: the patch no longer applies cleanly to `{bad}`; later commits touched the same lines.",
     "unverified": "Not verified.",
 }
-_EXT_LANG = {"py": "python", "js": "javascript", "sh": "sh"}
+_EXT_LANG = {"py": "python", "js": "javascript", "cjs": "javascript", "mjs": "javascript", "sh": "sh"}
 
 
 def _fence(text: str, lang: str = "") -> str:

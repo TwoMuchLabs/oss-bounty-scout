@@ -31,6 +31,10 @@ from bounty_scout.runner import git
 from bounty_scout.triage import Options, triage
 
 
+NOT_CODE = re.compile(r"(^|/)(tests?|testing|docs?|examples?|changelog\.d|\.github)/|(^|/)(test_[^/]+|[^/]+_test\.[^/]+|conftest\.py)$"
+                      r"|\.(md|rst|txt|pyi|toml|cfg|ini|ya?ml|json|lock)$|(^|/)(CHANGES|CHANGELOG|NEWS|LICENSE|AUTHORS)[^/]*$", re.I)
+
+
 def gh(path: str):
     out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
     if out.returncode != 0:
@@ -118,7 +122,8 @@ def cmd_run(args) -> int:
             row.update(status=result.status, bad=bad, good=result.good_ref, regression=result.regression,
                        signature=result.issue.error_signature,
                        head_reason=result.head.reason if result.head else None,
-                       head_tail=result.head.result.output.strip().splitlines()[-2:] if result.head else None,
+                       head_tail=result.head.result.output.strip().splitlines()[-5:] if result.head else None,
+                       in_project=not any('without passing through' in n for n in result.notes),
                        match=_match(result.head.reason) if result.head and result.status == "reproduced" else None,
                        python=next((n.split()[3].rstrip(",") for n in result.notes if n.startswith("Ran on Python")), None))
             b = result.bisect
@@ -146,7 +151,7 @@ def cmd_run(args) -> int:
             if result.status == "reproduced" and after and after != bad:
                 recheck = triage(repo, raw, cfg, Options(bad=after, bisect=False, trust_issue_code=args.sandbox == "worktree"))
                 row["after_fix"] = recheck.status  # "not-reproduced" means the real fix makes our test pass
-                if fix and recheck.status == "reproduced":
+                if fix and recheck.status == "reproduced" and any(not NOT_CODE.search(f) for f in _files(repo, fix)):
                     # The cases to distrust. Put enough in the log to judge each one by hand.
                     print(f"DETAIL {data['repo']}#{n} fix={fix[:10]} {git(repo, 'show', '-s', '--format=%s', fix).stdout.strip()[:90]}")
                     print(f"DETAIL   fix files: {_files(repo, fix)[:8]}")
@@ -159,6 +164,9 @@ def cmd_run(args) -> int:
             if fix:
                 fix_files = _files(repo, fix)
                 row["fix_files"] = fix_files[:12]
+                # An issue closed by a docs, typing-stub or test-only commit was not fixed in the code:
+                # the maintainers decided the behaviour stands. Our test still failing there is correct.
+                row["fix_changes_code"] = any(not NOT_CODE.search(f) for f in fix_files)
                 if result.suspect:
                     row["suspect_in_fix"] = result.suspect.file in fix_files
         except Exception as exc:  # keep going: one odd issue must not sink the batch
@@ -197,12 +205,17 @@ def summarise(data: dict, rows: list[dict]) -> dict:
         "inconclusive": count(lambda r: r.get("status") == "inconclusive"),
         "errors": count(lambda r: r.get("status") == "error"),
         # Only issues closed by a commit we can identify give a trustworthy "after": otherwise we are guessing by date.
-        "reproduced_with_known_fix": count(lambda r: r.get("status") == "reproduced" and r.get("fix_commit") and r.get("after_fix")),
-        "known_fix_makes_test_pass": count(lambda r: r.get("fix_commit") and r.get("after_fix") == "not-reproduced"),
-        "known_fix_still_fails": count(lambda r: r.get("fix_commit") and r.get("after_fix") == "reproduced"),
+        "reproduced_closed_without_code_change": count(lambda r: r.get("status") == "reproduced" and r.get("fix_commit") and r.get("fix_changes_code") is False),
+        "reproduced_with_known_fix": count(lambda r: r.get("status") == "reproduced" and r.get("fix_changes_code") and r.get("after_fix")),
+        "known_fix_makes_test_pass": count(lambda r: r.get("fix_changes_code") and r.get("after_fix") == "not-reproduced"),
+        "known_fix_still_fails": count(lambda r: r.get("fix_changes_code") and r.get("after_fix") == "reproduced"),
+        "known_fix_unclear": count(lambda r: r.get("fix_changes_code") and r.get("after_fix") == "inconclusive"),
+        "outside_project_code": count(lambda r: r.get("status") == "reproduced" and r.get("in_project") is False),
+        "outside_project_fix_passes": count(lambda r: r.get("in_project") is False and r.get("fix_changes_code") and r.get("after_fix") == "not-reproduced"),
+        "outside_project_fix_fails": count(lambda r: r.get("in_project") is False and r.get("fix_changes_code") and r.get("after_fix") == "reproduced"),
         **{f"match_{kind.replace('-', '_')}": count(lambda r, kind=kind: r.get("match") == kind) for kind in ("exact", "similar", "type-only")},
-        **{f"match_{kind.replace('-', '_')}_fix_passes": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_commit") and r.get("after_fix") == "not-reproduced") for kind in ("exact", "similar", "type-only")},
-        **{f"match_{kind.replace('-', '_')}_fix_fails": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_commit") and r.get("after_fix") == "reproduced") for kind in ("exact", "similar", "type-only")},
+        **{f"match_{kind.replace('-', '_')}_fix_passes": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_changes_code") and r.get("after_fix") == "not-reproduced") for kind in ("exact", "similar", "type-only")},
+        **{f"match_{kind.replace('-', '_')}_fix_fails": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_changes_code") and r.get("after_fix") == "reproduced") for kind in ("exact", "similar", "type-only")},
         "regression_yes": count(lambda r: r.get("regression") == "yes"),
         "regression_no": count(lambda r: r.get("regression") == "no"),
         "regression_unknown": count(lambda r: r.get("regression") == "unknown"),
