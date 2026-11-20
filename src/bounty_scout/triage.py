@@ -16,7 +16,7 @@ from .repro import project_index
 from .repro import (
     BAD, GOOD, CheckSpec, ReproPlan, Verdict, build_plan, complete_imports, evaluate, materialise, signature_pattern,
 )
-from .runner import Worktree, git
+from .runner import Worktree, ensure_image, git
 
 
 @dataclass
@@ -118,7 +118,34 @@ def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None,
     return result
 
 
-def _attempt(repo, result, plan: ReproPlan, cfg, opts, sandbox, repro_dir):
+_DEFAULT_IMAGE = Config().docker_image
+
+
+def _sandbox_image(repo, result, issue, plan: ReproPlan, cfg) -> str:
+    """Pick the container image: Node for JavaScript, the reporter's Python where the image name allows, plus packages."""
+    image = cfg.docker_image
+    if plan.source == "node-snippet" and image == _DEFAULT_IMAGE:
+        return cfg.node_image
+    if "{python}" in image:
+        stated = re.match(r"3\.(\d+)", issue.environment.get("python", ""))
+        if stated:
+            minor, why = int(stated.group(1)), "the version in the report"
+        else:
+            year = git(repo, "show", "-s", "--format=%cd", "--date=format:%Y", result.bad_sha).stdout.strip()
+            # Roughly the newest Python at the time of the commit: 3.8 in 2020, 3.9 in 2021, and so on.
+            minor, why = (int(year) - 2012 if year.isdigit() else 0), "the era of the commit under test"
+        known = sorted(int(v.split(".")[1]) for v in cfg.docker_python_versions)
+        default = int(cfg.docker_python.split(".")[1])
+        pick = min(known, key=lambda k: abs(k - minor)) if (stated or minor < default) else default
+        if pick != default:
+            note = f"Ran on Python 3.{pick}, to match {why}."
+            if note not in result.notes:
+                result.notes.append(note)
+        image = image.replace("{python}", f"3.{pick}")
+    return ensure_image(image, cfg.docker_packages)
+
+
+def _attempt(repo, result, plan: ReproPlan, cfg, opts, sandbox, repro_dir, issue=None):
     """Write the test, run it once at the failing ref, and return (spec, verdict, frames, command)."""
     if plan.source == "python-snippet":
         with Worktree(repo, result.bad_sha) as wt:  # read-only look at the project to fill in forgotten imports
@@ -130,7 +157,8 @@ def _attempt(repo, result, plan: ReproPlan, cfg, opts, sandbox, repro_dir):
         command=command, setup=opts.setup_cmd or cfg.setup,
         signature_pattern=signature_pattern(plan.signature), signature=plan.signature,
         timeout=opts.timeout or cfg.timeout, sandbox=sandbox, repro_dir=str(repro_dir),
-        docker_image=cfg.docker_image, docker_network=cfg.docker_network, pass_env=cfg.pass_env,
+        docker_image=_sandbox_image(repo, result, issue or result.issue, plan, cfg) if sandbox == "docker" else cfg.docker_image,
+        docker_network=cfg.docker_network, pass_env=cfg.pass_env,
     )
     with Worktree(repo, result.bad_sha) as wt:
         head = evaluate(spec, wt.path)
@@ -162,7 +190,7 @@ def _ai_test(repo, result, issue, body, original, cfg, opts, sandbox, repro_dir,
         header = f"# Test for issue #{issue.number}, written by an AI model ({ai.label}) from the report's description.\n"
         plan = ReproPlan("ai-test", "python3 {test_file}", f"test_issue_{issue.number}.py", header + code,
                          issue.error_signature or "AssertionError", uses_issue_code=True)
-        attempt = _attempt(repo, result, plan, cfg, opts, sandbox, repro_dir)
+        attempt = _attempt(repo, result, plan, cfg, opts, sandbox, repro_dir, issue)
         if attempt[1].status == BAD:
             result.ai_test_gate = gate
             return plan, attempt
@@ -205,7 +233,7 @@ def _ai_fix(repo, result, issue, body, spec, ai) -> Fix | None:
 
 
 def _run(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai) -> None:
-    original = _attempt(repo, result, plan, cfg, opts, sandbox, repro_dir) if plan else None
+    original = _attempt(repo, result, plan, cfg, opts, sandbox, repro_dir, issue) if plan else None
     attempt = original
     # The model is asked only when the report gave us nothing that reproduces: no code, or code that fails differently.
     if ai and (original is None or (original[1].status not in (GOOD, BAD) and plan.source == "python-snippet")):

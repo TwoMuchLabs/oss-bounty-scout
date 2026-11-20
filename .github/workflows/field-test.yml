@@ -35,14 +35,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { repo: pallets/click, deps: "" }
-          - { repo: pallets/jinja, deps: "markupsafe" }
-          - { repo: pallets/werkzeug, deps: "markupsafe" }
-          - { repo: python-attrs/attrs, deps: "" }
-          - { repo: marshmallow-code/marshmallow, deps: "packaging" }
-          - { repo: Textualize/rich, deps: "markdown-it-py pygments" }
-          - { repo: python-poetry/tomlkit, deps: "" }
-          - { repo: pypa/packaging, deps: "" }
+          # "main": the projects whose failures shaped the tool. extras = packages their reporters' snippets import.
+          - { set: main, kind: python, repo: pallets/click, deps: "semver" }
+          - { set: main, kind: python, repo: pallets/jinja, deps: "markupsafe flask" }
+          - { set: main, kind: python, repo: pallets/werkzeug, deps: "markupsafe flask requests" }
+          - { set: main, kind: python, repo: python-attrs/attrs, deps: "typing_extensions numpy pydantic" }
+          - { set: main, kind: python, repo: marshmallow-code/marshmallow, deps: "packaging" }
+          - { set: main, kind: python, repo: Textualize/rich, deps: "markdown-it-py pygments pydantic" }
+          - { set: main, kind: python, repo: python-poetry/tomlkit, deps: "" }
+          - { set: main, kind: python, repo: pypa/packaging, deps: "pyparsing" }
+          # "holdout": projects the tool was never tuned on. If it only works on the ones above, this is where it shows.
+          - { set: holdout, kind: python, repo: andialbrecht/sqlparse, deps: "" }
+          - { set: holdout, kind: python, repo: pyparsing/pyparsing, deps: "" }
+          - { set: holdout, kind: python, repo: arrow-py/arrow, deps: "python-dateutil" }
+          - { set: holdout, kind: python, repo: tqdm/tqdm, deps: "" }
+          - { set: holdout, kind: python, repo: PyCQA/isort, deps: "" }
+          - { set: holdout, kind: python, repo: pygments/pygments, deps: "" }
+          - { set: holdout, kind: python, repo: more-itertools/more-itertools, deps: "" }
+          - { set: holdout, kind: node, repo: tj/commander.js, deps: "" }
+          - { set: holdout, kind: node, repo: minimistjs/minimist, deps: "" }
+          - { set: holdout, kind: node, repo: npm/node-semver, deps: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -55,14 +67,19 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install .
-      - name: Build an image that already holds the project's dependencies
+      - name: Build images that already hold the project's dependencies, one per Python version
+        if: matrix.kind == 'python'
         run: |
-          printf 'FROM python:3.12-slim\nRUN pip install --no-cache-dir pytest %s || true\n' "${{ matrix.deps }}" > "$RUNNER_TEMP/Dockerfile"
-          docker build -q -t scout-field -f "$RUNNER_TEMP/Dockerfile" "$RUNNER_TEMP"
+          for v in 3.8 3.9 3.10 3.11 3.12 3.13; do
+            printf 'FROM python:%s-slim\nRUN pip install --no-cache-dir pytest || true\nRUN for p in %s; do pip install --no-cache-dir "$p" || true; done\n' "$v" "${{ matrix.deps }}" > "$RUNNER_TEMP/Dockerfile"
+            docker build -q -t "scout-field-py$v" -f "$RUNNER_TEMP/Dockerfile" "$RUNNER_TEMP" &
+          done
+          wait
+          docker image ls --format '{{.Repository}}' | grep -c scout-field-py
       - name: Fetch closed issues
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python fieldtest/field_test.py fetch "${{ matrix.repo }}" "$RUNNER_TEMP/issues.json" --issues "${{ inputs.issues || '300' }}" ${{ (inputs.ai == 'anthropic' || inputs.ai == 'openai') && '--prose' || '' }}
+        run: python fieldtest/field_test.py fetch "${{ matrix.repo }}" "$RUNNER_TEMP/issues.json" --issues "${{ inputs.issues || '300' }}" --kind "${{ matrix.kind }}" ${{ (inputs.ai == 'anthropic' || inputs.ai == 'openai') && '--prose' || '' }}
       # No GitHub token below this line: issue code runs here, inside a container with no network.
       # The AI key, when used, stays in the scout's own process and is never passed into the container.
       - name: Replay
@@ -72,7 +89,8 @@ jobs:
           AI_MODEL: ${{ inputs.ai_model }}
         run: |
           status=0
-          python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --image scout-field \
+          python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --set "${{ matrix.set }}" \
+            --image "${{ matrix.kind == 'node' && 'node:22-slim' || 'scout-field-py{python}' }}" \
             --limit "${{ inputs.limit || '80' }}" --ai "${{ inputs.ai || 'off' }}" --ai-model "$AI_MODEL" || status=$?
           cat "$RUNNER_TEMP/out/summary.md" >> "$GITHUB_STEP_SUMMARY"
           exit $status  # non-zero when a culprit in fieldtest/golden.json was lost or changed

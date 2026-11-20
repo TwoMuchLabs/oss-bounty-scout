@@ -178,6 +178,8 @@ def _classify(lang: str, text: str, section: str) -> str:
         return "python"
     if re.search(r"^\s*\$\s+\S", text, re.M):
         return "shell"
+    if re.search(r"\brequire\(['\"]|^\s*(?:const|let|var)\s+[\w{}, ]+\s*=|console\.log\(", text, re.M):
+        return "javascript"
     return "unknown"
 
 

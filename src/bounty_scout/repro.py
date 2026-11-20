@@ -359,13 +359,34 @@ def complete_imports(plan: ReproPlan, worktree: str | Path) -> None:
         plan.notes.append("Added imports the snippet left out: " + ", ".join(f"`{l}`" for l in lines) + ".")
 
 
+# Loaded with ``node -r``: makes ``require('<this package>')`` resolve to the checkout under test,
+# the way it would for someone who installed the package, without touching the checkout.
+NODE_ALIAS = """const Module = require('module');
+const path = require('path');
+let name;
+try { name = require(path.join(process.cwd(), 'package.json')).name; } catch (e) {}
+if (name) {
+  const resolve = Module._resolveFilename;
+  Module._resolveFilename = function (request, ...rest) {
+    if (request === name) request = process.cwd();
+    else if (request.startsWith(name + '/')) request = path.join(process.cwd(), request.slice(name.length + 1));
+    return resolve.call(this, request, ...rest);
+  };
+}
+"""
+
+
 def materialise(plan: ReproPlan, repro_dir: Path, sandbox: str) -> str:
     """Write the test file outside the worktree and return the concrete command."""
     if not plan.test_filename:
         return plan.command
     (repro_dir / plan.test_filename).write_text(plan.test_content or "")
-    visible = f"/scout/{plan.test_filename}" if sandbox == "docker" else str(repro_dir / plan.test_filename)
-    return plan.command.replace("{test_file}", visible)
+    base = "/scout" if sandbox == "docker" else str(repro_dir)
+    command = plan.command
+    if plan.source == "node-snippet":
+        (repro_dir / "scout_alias.js").write_text(NODE_ALIAS)
+        command = command.replace("node {test_file}", f"node -r {base}/scout_alias.js {{test_file}}")
+    return command.replace("{test_file}", f"{base}/{plan.test_filename}")
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -379,37 +400,42 @@ def _mask(message: str) -> str:
 
 
 def error_matches(signature: str | None, pattern: str | None, output: str) -> bool:
-    """Is the reported error in this output?
+    return match_kind(signature, pattern, output) is not None
 
-    An exact (number-tolerant) match first. Otherwise the same exception type
-    with a similar message counts: Python versions reword messages and add
-    qualified names, and paths differ between the reporter's machine and ours.
+
+def match_kind(signature: str | None, pattern: str | None, output: str) -> str | None:
+    """Is the reported error in this output, and how sure is the match?
+
+    ``exact``: the reported line, allowing for changed numbers. ``similar``: the
+    same exception type with a similar message, since Python versions reword
+    messages and add qualified names, and paths differ between machines.
+    ``type-only``: the same exception type, when that is all there is to compare.
     """
     text = _ANSI.sub("", output)
     if pattern and re.search(pattern, " ".join(text.split())):
-        return True
+        return "exact"
     wanted = _TYPED.match(signature or "")
     if not wanted:
-        return False
+        return None
     want_type, want_msg = wanted.group("type").split(".")[-1], _mask(wanted.group("msg") or "")
     for found in _TYPED.finditer(text):
         if found.group("type").split(".")[-1] != want_type:
             continue
         got_msg = _mask(found.group("msg") or "")
         if not want_msg:
-            return True  # the report gave only the exception type
+            return "type-only"  # the report gave only the exception type
         if not got_msg:
             # pytest prints the compared values ("assert 1 == 2"); a plain run of the same assert prints nothing.
             if want_type == "AssertionError" and want_msg.startswith("assert "):
-                return True
+                return "type-only"
             continue
         if want_msg in got_msg or got_msg in want_msg or difflib.SequenceMatcher(None, want_msg, got_msg).ratio() >= 0.6:
-            return True
+            return "similar"
         # Dict and set contents print in varying order: compare the words regardless of order.
         want_words, got_words = set(re.findall(r"\w+", want_msg)), set(re.findall(r"\w+", got_msg))
         if len(want_words) >= 6 and len(want_words & got_words) / len(want_words | got_words) >= 0.6:
-            return True
-    return False
+            return "similar"
+    return None
 
 
 def classify(result: RunResult, pattern: str | None, signature: str | None = None) -> tuple[str, str]:
@@ -418,8 +444,11 @@ def classify(result: RunResult, pattern: str | None, signature: str | None = Non
     if result.timed_out:
         return SKIP, "timed out"
     if pattern or signature:
-        if error_matches(signature, pattern, result.output):
-            return BAD, "reported error present in output"
+        kind = match_kind(signature, pattern, result.output)
+        if kind:
+            return BAD, {"exact": "reported error present in output",
+                         "similar": "same error type with a similar message in output",
+                         "type-only": "same error type in output; the report gave no message to compare"}[kind]
         if result.exit_code == 0:
             return GOOD, "exited 0 without the reported error"
         return SKIP, f"exited {result.exit_code} with a different failure"

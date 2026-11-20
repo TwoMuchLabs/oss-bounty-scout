@@ -39,13 +39,13 @@ def gh(path: str):
     return json.loads(out.stdout)
 
 
-def is_candidate(raw: dict, prose: bool = False) -> bool:
+def is_candidate(raw: dict, prose: bool = False, kind: str = "python") -> bool:
     """Default: reports with a runnable snippet and an error. ``prose``: an error but nothing runnable (the AI's job)."""
     issue = parse_issue(raw)
     plan = build_plan(issue)
     if prose:
         return bool(plan is None and issue.error_signature)
-    return bool(plan and plan.source == "python-snippet" and issue.error_signature)
+    return bool(plan and plan.source == f"{kind}-snippet" and issue.error_signature)
 
 
 def cmd_fetch(args) -> int:
@@ -56,7 +56,7 @@ def cmd_fetch(args) -> int:
         if not batch or len(issues) >= args.issues:
             break
     issues = issues[: args.issues]
-    candidates = [i for i in issues if is_candidate(i, args.prose)]
+    candidates = [i for i in issues if is_candidate(i, args.prose, args.kind)]
     for raw in candidates:
         n = raw["number"]
         timeline = gh(f"repos/{args.repo}/issues/{n}/timeline?per_page=100") or []
@@ -80,6 +80,10 @@ def cmd_fetch(args) -> int:
     Path(args.output).write_text(json.dumps({"repo": args.repo, "scanned": len(issues), "candidates": candidates}))
     print(f"{args.repo}: scanned {len(issues)} closed issues, {len(candidates)} with a runnable snippet and an error", file=sys.stderr)
     return 0
+
+
+def _match(reason: str) -> str:
+    return "similar" if "similar message" in reason else "type-only" if "no message to compare" in reason else "exact"
 
 
 def _ts(value: str) -> datetime:
@@ -114,7 +118,9 @@ def cmd_run(args) -> int:
             row.update(status=result.status, bad=bad, good=result.good_ref, regression=result.regression,
                        signature=result.issue.error_signature,
                        head_reason=result.head.reason if result.head else None,
-                       head_tail=result.head.result.output.strip().splitlines()[-2:] if result.head else None)
+                       head_tail=result.head.result.output.strip().splitlines()[-2:] if result.head else None,
+                       match=_match(result.head.reason) if result.head and result.status == "reproduced" else None,
+                       python=next((n.split()[3].rstrip(",") for n in result.notes if n.startswith("Ran on Python")), None))
             b = result.bisect
             if b:
                 row.update(bisect=b.status, range=b.commits_in_range, steps=len(b.steps))
@@ -140,6 +146,16 @@ def cmd_run(args) -> int:
             if result.status == "reproduced" and after and after != bad:
                 recheck = triage(repo, raw, cfg, Options(bad=after, bisect=False, trust_issue_code=args.sandbox == "worktree"))
                 row["after_fix"] = recheck.status  # "not-reproduced" means the real fix makes our test pass
+                if fix and recheck.status == "reproduced":
+                    # The cases to distrust. Put enough in the log to judge each one by hand.
+                    print(f"DETAIL {data['repo']}#{n} fix={fix[:10]} {git(repo, 'show', '-s', '--format=%s', fix).stdout.strip()[:90]}")
+                    print(f"DETAIL   fix files: {_files(repo, fix)[:8]}")
+                    print(f"DETAIL   wanted: {(result.issue.error_signature or '')[:200]}")
+                    for line in (result.plan.test_content or result.command).splitlines()[:45]:
+                        print(f"DETAIL   | {line[:160]}")
+                    for label, verdict in (("before", result.head), ("after ", recheck.head)):
+                        for line in verdict.result.output.strip().splitlines()[-6:]:
+                            print(f"DETAIL   {label}> {line[:200]}")
             if fix:
                 fix_files = _files(repo, fix)
                 row["fix_files"] = fix_files[:12]
@@ -165,7 +181,7 @@ def cmd_run(args) -> int:
     summary["golden_expected"], summary["golden_lost"] = len(golden), len(lost)
     (out / "results.json").write_text(json.dumps({"repo": data["repo"], "summary": summary, "rows": rows}, indent=2))
     (out / "summary.md").write_text(markdown(data["repo"], summary, rows))
-    print("SUMMARY " + json.dumps({"repo": data["repo"], **summary}))
+    print("SUMMARY " + json.dumps({"repo": data["repo"], "set": args.set, **summary}))
     for line in lost:
         print(f"GOLDEN LOST {data['repo']} {line}")
     return 1 if lost and args.ai == "off" else 0
@@ -184,6 +200,9 @@ def summarise(data: dict, rows: list[dict]) -> dict:
         "reproduced_with_known_fix": count(lambda r: r.get("status") == "reproduced" and r.get("fix_commit") and r.get("after_fix")),
         "known_fix_makes_test_pass": count(lambda r: r.get("fix_commit") and r.get("after_fix") == "not-reproduced"),
         "known_fix_still_fails": count(lambda r: r.get("fix_commit") and r.get("after_fix") == "reproduced"),
+        **{f"match_{kind.replace('-', '_')}": count(lambda r, kind=kind: r.get("match") == kind) for kind in ("exact", "similar", "type-only")},
+        **{f"match_{kind.replace('-', '_')}_fix_passes": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_commit") and r.get("after_fix") == "not-reproduced") for kind in ("exact", "similar", "type-only")},
+        **{f"match_{kind.replace('-', '_')}_fix_fails": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_commit") and r.get("after_fix") == "reproduced") for kind in ("exact", "similar", "type-only")},
         "regression_yes": count(lambda r: r.get("regression") == "yes"),
         "regression_no": count(lambda r: r.get("regression") == "no"),
         "regression_unknown": count(lambda r: r.get("regression") == "unknown"),
@@ -217,6 +236,7 @@ def main() -> int:
     p = sub.add_parser("fetch")
     p.add_argument("repo"); p.add_argument("output"); p.add_argument("--pages", type=int, default=30)
     p.add_argument("--issues", type=int, default=300, help="closed issues to scan")
+    p.add_argument("--kind", default="python", choices=["python", "node"], help="language of the snippets to select")
     p.add_argument("--prose", action="store_true", help="select reports with an error but no runnable code (for --ai runs)")
     p.set_defaults(func=cmd_fetch)
     p = sub.add_parser("run")
@@ -224,6 +244,7 @@ def main() -> int:
     p.add_argument("--image", required=True); p.add_argument("--limit", type=int, default=40)
     p.add_argument("--timeout", type=float, default=60)
     p.add_argument("--sandbox", default="docker", choices=["docker", "worktree"])
+    p.add_argument("--set", default="main", help="label for the summary: 'main' projects shaped the tool, 'holdout' ones did not")
     p.add_argument("--ai", default="off", choices=["off", "anthropic", "openai"]); p.add_argument("--ai-model")
     p.set_defaults(func=cmd_run)
     args = parser.parse_args()

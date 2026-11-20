@@ -16,7 +16,11 @@ class Config:
     good: str | None = None  # known-good ref to bisect from
     timeout: float = 120
     sandbox: str = "worktree"
-    docker_image: str = "python:3.12-slim"
+    docker_image: str = "python:3.12-slim"  # may contain {python}, filled with the version the report was filed against
+    docker_python: str = "3.12"  # used for {python} when neither the report nor the commit date suggests one
+    docker_python_versions: list[str] = field(default_factory=lambda: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"])
+    docker_packages: list[str] = field(default_factory=list)  # pip packages baked into a derived image, built once
+    node_image: str = "node:22-slim"  # used for JavaScript snippets when docker_image is left at its Python default
     docker_network: str = "none"
     pass_env: list[str] = field(default_factory=list)
     trusted_associations: list[str] = field(default_factory=lambda: ["OWNER", "MEMBER", "COLLABORATOR"])

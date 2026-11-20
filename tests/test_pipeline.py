@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -106,6 +107,15 @@ class DockerTests(RepoCase):
         self.assertIn("token None", result.output)
         self.assertIn("network-blocked", result.output)
         self.assertNotIn("uid 0 ", result.output)
+
+    def test_packages_are_baked_into_a_derived_image(self):
+        body = "```python\nimport six\nimport statskit\nstatskit.mean([])\n```\n\nZeroDivisionError: division by zero"
+        cfg = Config(sandbox="docker", docker_packages=["six"])
+        result = triage(self.repo, fixture.issue(body=body), cfg, Options(bisect=False))
+        self.assertEqual(result.status, "reproduced", result.head.result.output)
+        without = triage(self.repo, fixture.issue(body=body), Config(sandbox="docker"), Options(bisect=False))
+        self.assertEqual(without.status, "inconclusive")
+        self.assertIn("needs the module `six`", " ".join(without.notes))
 
     def test_timeout_stops_the_container(self):
         with Worktree(self.repo, "HEAD") as wt:
@@ -219,6 +229,63 @@ class PlanTests(RepoCase):
         result = triage(self.repo, fixture.issue(body=body))
         self.assertEqual(result.status, "inconclusive")
         self.assertIn("needs the module `not_installed_anywhere`", " ".join(result.notes))
+
+
+@unittest.skipUnless(shutil.which("node"), "needs Node.js")
+class NodeTests(unittest.TestCase):
+    """JavaScript snippets: require('<package name>') must reach the checkout under test."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.work = Path(tempfile.mkdtemp(prefix="scout-node-"))
+        cls.repo = cls.work / "tinylib"
+        good = "exports.size = function (s) {\n  if (s == null) return 0;\n  return s.length;\n};\n"
+        fixture._git(cls.work, "init", "-q", "-b", "main", str(cls.repo))
+        fixture._commit(cls.repo, "start", {"package.json": '{"name": "tinylib", "main": "index.js"}\n', "index.js": good,
+                                            "lib/extra.js": "exports.two = () => 2;\n"})
+        fixture._git(cls.repo, "tag", "v1.0.0")
+        fixture._commit(cls.repo, "docs", {"README.md": "# tinylib\n"})
+        cls.culprit = fixture._commit(cls.repo, "simplify size", {"index.js": good.replace("  if (s == null) return 0;\n", "")})
+        fixture._commit(cls.repo, "more docs", {"README.md": "# tinylib\n\nmore\n"})
+
+    BODY = ("Since the last release this crashes:\n\n```js\nconst tiny = require('tinylib');\n"
+            "const { two } = require('tinylib/lib/extra');\nconsole.log(two(), tiny.size(undefined));\n```\n\n"
+            "```\nTypeError: Cannot read properties of undefined (reading 'length')\n    at exports.size (/home/me/node_modules/tinylib/index.js:2:12)\n```\n")
+
+    def test_end_to_end(self):
+        result = triage(self.repo, fixture.issue(body=self.BODY))
+        self.assertEqual(result.status, "reproduced", result.head and result.head.result.output)
+        self.assertEqual(result.plan.source, "node-snippet")
+        self.assertEqual(result.bisect.culprit.sha, self.culprit)
+        self.assertEqual(result.suspect.file, "index.js")
+        self.assertEqual(result.fix.status, "verified")
+        self.assertEqual(git(self.repo, "status", "--porcelain").stdout, "")
+
+    def test_unlabelled_javascript_is_recognised(self):
+        body = self.BODY.replace("```js", "```")
+        self.assertEqual(parse_issue(fixture.issue(body=body)).code_blocks[0].kind, "javascript")
+
+
+class ImageChoiceTests(RepoCase):
+    def pick(self, body, **cfg):
+        from bounty_scout.triage import TriageResult, _sandbox_image
+        issue = parse_issue(fixture.issue(body=body))
+        result = TriageResult(issue, "needs-info", bad_sha=self.info["head"])
+        plan = build_plan(issue) or build_plan(parse_issue(fixture.issue()))
+        return _sandbox_image(self.repo, result, issue, plan, Config(**cfg)), result.notes
+
+    def test_python_version_follows_the_report(self):
+        snippet = "```python\nimport statskit\n```\n\nKeyError: 'x'\n\n"
+        image, notes = self.pick(snippet + "Python 3.9.7 on Ubuntu", docker_image="ci:py{python}")
+        self.assertEqual((image, notes), ("ci:py3.9", ["Ran on Python 3.9, to match the version in the report."]))
+        self.assertEqual(self.pick(snippet + "Python 3.6", docker_image="ci:py{python}")[0], "ci:py3.8")  # nearest we have
+        self.assertEqual(self.pick(snippet, docker_image="ci:py{python}"), ("ci:py3.12", []))  # recent commit: default
+        self.assertEqual(self.pick(snippet + "Python 3.9", docker_image="fixed:latest")[0], "fixed:latest")
+
+    def test_javascript_gets_a_node_image_unless_one_was_chosen(self):
+        js = "```js\nconst x = require('x');\n```\n\nTypeError: boom"
+        self.assertEqual(self.pick(js)[0], "node:22-slim")
+        self.assertEqual(self.pick(js, docker_image="mine:1")[0], "mine:1")
 
 
 class BisectOutputTests(unittest.TestCase):

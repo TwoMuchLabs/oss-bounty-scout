@@ -12,6 +12,7 @@ Two isolation levels:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shlex
 import shutil
@@ -160,6 +161,24 @@ def docker_argv(
     # Enforce the time limit inside the container too, so a hung test does not wait on the outer grace period.
     limit = ["timeout", "-k", "2", str(max(1, int(timeout)))] if timeout else []
     return argv + [image, *limit, "sh", "-c", script]
+
+
+def ensure_image(base: str, packages: list[str]) -> str:
+    """A local image that is ``base`` plus the maintainer's pip packages. Built once, then reused.
+
+    The build needs the network; the tests that later run in the image do not get it.
+    """
+    if not packages:
+        return base
+    digest = hashlib.sha1((base + "\n" + "\n".join(sorted(packages))).encode()).hexdigest()[:12]
+    tag = f"scout-env:{digest}"
+    if subprocess.run(["docker", "image", "inspect", tag], capture_output=True).returncode == 0:
+        return tag
+    dockerfile = f"FROM {base}\nRUN pip install --no-cache-dir {' '.join(shlex.quote(p) for p in packages)}\n"
+    build = subprocess.run(["docker", "build", "-q", "-t", tag, "-"], input=dockerfile, capture_output=True, text=True)
+    if build.returncode != 0:
+        raise RuntimeError(f"could not build the sandbox image from {base} with {packages}: {build.stderr.strip()[-400:]}")
+    return tag
 
 
 def run_isolated(
