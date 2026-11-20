@@ -96,17 +96,8 @@ def _blamed_commit(repo: str | Path, ref: str, file: str, line: int) -> str | No
     return proc.stdout.split(" ", 1)[0] if proc.returncode == 0 and proc.stdout else None
 
 
-def locate(repo: str | Path, culprit: str, bad: str, frames: list[tuple[str, int]]) -> Suspect | None:
-    """Rank where in the culprit commit the regression most likely lives.
-
-    ``frames`` must be relative to ``bad`` (innermost frame last).
-    """
-    hunks = changed_hunks(repo, culprit)
-    if not hunks:
-        return None
-    touched = {h.file for h in hunks}
-    in_culprit = [(f, l) for f, l in frames if f in touched]
-
+def _frame_on_changed_line(repo: str | Path, culprit: str, bad: str, in_culprit: list[tuple[str, int]], hunks: list[Hunk]) -> Suspect | None:
+    """The innermost frame that lands on, or right next to, a line the culprit commit changed."""
     for file, line in reversed(in_culprit):
         if _blamed_commit(repo, bad, file, line) == culprit:
             return Suspect(file, line, "high", "a stack frame of the failure lands on a line last changed by the culprit commit")
@@ -116,10 +107,11 @@ def locate(repo: str | Path, culprit: str, bad: str, frames: list[tuple[str, int
         if git(repo, "diff", "--quiet", culprit, bad, "--", file, check=False).returncode == 0:
             if any(h.file == file and h.start - 3 <= line <= h.start + h.count + 3 for h in hunks):
                 return Suspect(file, line, "high", "a stack frame of the failure is adjacent to lines the culprit commit changed or removed")
-    if in_culprit:
-        file, line = in_culprit[-1]
-        return Suspect(file, line, "medium", "the failure's stack passes through a file changed by the culprit commit")
+    return None
 
+
+def _most_changed_file(hunks: list[Hunk]) -> Suspect:
+    """With no stack frame to go on: the source file the culprit commit changed most, at its biggest hunk."""
     source = [h for h in hunks if not _NOT_SOURCE.search(h.file)] or hunks
     per_file: dict[str, int] = {}
     for h in source:
@@ -132,6 +124,25 @@ def locate(repo: str | Path, culprit: str, bad: str, frames: list[tuple[str, int
         "the only source file changed by the culprit commit" if only
         else "the most heavily changed source file in the culprit commit (no stack frame matched)",
     )
+
+
+def locate(repo: str | Path, culprit: str, bad: str, frames: list[tuple[str, int]]) -> Suspect | None:
+    """Rank where in the culprit commit the regression most likely lives.
+
+    ``frames`` must be relative to ``bad`` (innermost frame last).
+    """
+    hunks = changed_hunks(repo, culprit)
+    if not hunks:
+        return None
+    touched = {h.file for h in hunks}
+    in_culprit = [(f, l) for f, l in frames if f in touched]
+    if not in_culprit:
+        return _most_changed_file(hunks)
+    on_line = _frame_on_changed_line(repo, culprit, bad, in_culprit, hunks)
+    if on_line:
+        return on_line
+    file, line = in_culprit[-1]
+    return Suspect(file, line, "medium", "the failure's stack passes through a file changed by the culprit commit")
 
 
 def _revert_diff(repo: str | Path, culprit: str, file: str | None) -> str:
