@@ -259,44 +259,43 @@ def _ai_fix(repo, result, issue, body, spec, ai) -> Fix | None:
     return None
 
 
-def _run(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai) -> None:
+def _first_attempt(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai):
+    """Run the reporter's code; ask the model for a test only when that gave nothing that reproduces.
+
+    Returns the plan in use and what running it showed (None when there was nothing to run).
+    """
     original = _attempt(repo, result, plan, cfg, opts, sandbox, repro_dir, issue) if plan else None
-    attempt = original
-    # The model is asked only when the report gave us nothing that reproduces: no code, or code that fails differently.
+    # No code, or code that fails differently from the report.
     if ai and (original is None or (original[1].status not in (GOOD, BAD) and plan.source == "python-snippet")):
         accepted = _ai_test(repo, result, issue, body, original, cfg, opts, sandbox, repro_dir, ai)
         if accepted:
-            plan, attempt = accepted
-            result.plan = plan
-    if attempt is None:
-        result.notes.append("No runnable reproduction was found in the issue. Pass `--test-cmd` to supply one.")
-        return
-    if plan.test_filename:  # earlier attempts share the file name; make sure the one in use is on disk
-        (repro_dir / plan.test_filename).write_text(plan.test_content or "")
-    spec, head, head_frames, result.command = attempt
-    result.head = head
+            result.plan = accepted[0]
+            return accepted
+    return plan, original
 
+
+def _note_no_reproduction(result, head: Verdict, bad_ref: str) -> None:
+    """The test ran but did not fail the way the report says."""
     if head.status == GOOD:
         result.status = "not-reproduced"
         return
-    if head.status != BAD:
-        result.status = "inconclusive"
-        result.notes.append(f"The reproduction did not behave as reported at `{opts.bad}`: {head.reason}.")
-        module = re.search(r"ModuleNotFoundError: No module named '([\w.]+)'", head.result.output)
-        if module:
-            result.notes.append(
-                f"It needs the module `{module.group(1)}`, which is not available where the test ran. "
-                "Install it with `--setup-cmd`, or use a `docker_image` that includes it."
-            )
-        return
-    result.status = "reproduced"
-    # The exact reported line appeared here, so in this environment nothing needs rewording tolerance:
-    # from now on (baseline, bisect, checking a fix) only that line counts, not a similar message.
-    spec.strict = head.reason.startswith("reported error present")
-    result.match = ("exact" if spec.strict else "similar" if "similar message" in head.reason
+    result.status = "inconclusive"
+    result.notes.append(f"The reproduction did not behave as reported at `{bad_ref}`: {head.reason}.")
+    module = re.search(r"ModuleNotFoundError: No module named '([\w.]+)'", head.result.output)
+    if module:
+        result.notes.append(
+            f"It needs the module `{module.group(1)}`, which is not available where the test ran. "
+            "Install it with `--setup-cmd`, or use a `docker_image` that includes it."
+        )
+
+
+def _note_reproduction(result, plan: ReproPlan, head: Verdict, head_frames, exact: bool) -> None:
+    """Record how the failure was recognised and anything about it a maintainer should doubt."""
+    result.match = ("exact" if exact else "similar" if "similar message" in head.reason
                     else "type-only" if "no message to compare" in head.reason else "exit-code")
-    result.in_project = bool(head_frames) or plan.source not in ("python-snippet", "ai-test")
-    if not head_frames and plan.source in ("python-snippet", "ai-test"):
+    from_issue = plan.source in ("python-snippet", "ai-test")
+    result.in_project = bool(head_frames) or not from_issue
+    if not head_frames and from_issue:
         result.notes.append(
             "The error is raised without passing through the project's own files: it comes from the snippet itself "
             "or from a library. Check that this is a bug in the project before acting on it."
@@ -306,6 +305,33 @@ def _run(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai) -> 
             "The failure mentions missing package metadata. The project is run from its source tree here, not installed; "
             "if that matters for this bug, set `setup = \"pip install -e .\"`."
         )
+
+
+def _innermost_frame(head_frames) -> Suspect | None:
+    """With no culprit commit to point at, the best lead is where the failure left the project's code."""
+    if not head_frames:
+        return None
+    file, line = head_frames[-1]
+    return Suspect(file, line, "low", "the innermost project frame in the failure; no culprit commit was identified")
+
+
+def _run(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai) -> None:
+    plan, attempt = _first_attempt(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai)
+    if attempt is None:
+        result.notes.append(_NO_REPRODUCTION)
+        return
+    if plan.test_filename:  # earlier attempts share the file name; make sure the one in use is on disk
+        (repro_dir / plan.test_filename).write_text(plan.test_content or "")
+    spec, head, head_frames, result.command = attempt
+    result.head = head
+    if head.status != BAD:
+        _note_no_reproduction(result, head, opts.bad)
+        return
+    result.status = "reproduced"
+    # The exact reported line appeared here, so in this environment nothing needs rewording tolerance:
+    # from now on (baseline, bisect, checking a fix) only that line counts, not a similar message.
+    spec.strict = head.reason.startswith("reported error present")
+    _note_reproduction(result, plan, head, head_frames, spec.strict)
 
     if opts.bisect:
         _trace(repo, result, issue, cfg, opts, spec, head_frames)
@@ -317,9 +343,7 @@ def _run(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai) -> 
             "passes it, so it does not show that the reported bug exists. Read the test before relying on it."
         )
         return
-    if not result.suspect and head_frames:
-        file, line = head_frames[-1]
-        result.suspect = Suspect(file, line, "low", "the innermost project frame in the failure; no culprit commit was identified")
+    result.suspect = result.suspect or _innermost_frame(head_frames)
     if ai and opts.bisect and result.suspect and not (result.fix and result.fix.status == "verified"):
         result.fix = _ai_fix(repo, result, issue, body, spec, ai) or result.fix
 
