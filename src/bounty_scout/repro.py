@@ -259,6 +259,38 @@ def missing_names(code: str) -> list[str]:
     return [name for name in dict.fromkeys(n.id for n in loads) if name not in bound]
 
 
+def _importable_files(base: Path, child: Path) -> list[Path] | None:
+    """The Python files of a top-level package or module, or None when ``child`` is neither."""
+    if child.name.startswith((".", "_")):
+        return None
+    if child.is_dir() and (child / "__init__.py").exists() and child.name not in _SKIP_DIRS:
+        return sorted(p for p in child.rglob("*.py") if not (_SKIP_DIRS & set(p.relative_to(base).parts)))
+    if child.is_file() and child.suffix == ".py" and child.stem not in _SKIP_MODULES:
+        return [child]
+    return None
+
+
+def _names_bound(node: ast.stmt) -> list[tuple[str, bool]]:
+    """(name, is_definition) for one module-level statement: definitions and assignments, and re-exports."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [(node.name, True)]
+    if isinstance(node, ast.Assign):
+        return [(t.id, True) for t in node.targets if isinstance(t, ast.Name)]
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return [(node.target.id, True)]
+    if isinstance(node, ast.ImportFrom):
+        return [(a.asname or a.name, False) for a in node.names if a.name != "*"]
+    return []
+
+
+def _public_names(file: Path) -> list[tuple[str, bool]]:
+    try:
+        tree = ast.parse(file.read_text(errors="replace"))
+    except (SyntaxError, ValueError, OSError):
+        return []
+    return [(name, defined) for node in tree.body for name, defined in _names_bound(node) if not name.startswith("_")]
+
+
 def project_index(root: Path, max_files: int = 1500) -> tuple[set[str], dict[str, list[tuple[str, bool]]]]:
     """Top-level importable names, and for each top-level name in the project's modules: (module, is_definition).
 
@@ -271,13 +303,8 @@ def project_index(root: Path, max_files: int = 1500) -> tuple[set[str], dict[str
         if not base.is_dir():
             continue
         for child in sorted(base.iterdir()):
-            if child.name.startswith((".", "_")):
-                continue
-            if child.is_dir() and (child / "__init__.py").exists() and child.name not in _SKIP_DIRS:
-                files = sorted(p for p in child.rglob("*.py") if not (_SKIP_DIRS & set(p.relative_to(base).parts)))
-            elif child.is_file() and child.suffix == ".py" and child.stem not in _SKIP_MODULES:
-                files = [child]
-            else:
+            files = _importable_files(base, child)
+            if files is None:
                 continue
             top.add(child.stem if child.is_file() else child.name)
             for file in files:
@@ -286,23 +313,8 @@ def project_index(root: Path, max_files: int = 1500) -> tuple[set[str], dict[str
                     return top, exports
                 rel = file.relative_to(base).with_suffix("")
                 module = ".".join(rel.parts[:-1] if rel.name == "__init__" else rel.parts)
-                try:
-                    tree = ast.parse(file.read_text(errors="replace"))
-                except (SyntaxError, ValueError, OSError):
-                    continue
-                for node in tree.body:
-                    names: list[tuple[str, bool]] = []
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                        names.append((node.name, True))
-                    elif isinstance(node, ast.Assign):
-                        names += [(t.id, True) for t in node.targets if isinstance(t, ast.Name)]
-                    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                        names.append((node.target.id, True))
-                    elif isinstance(node, ast.ImportFrom):
-                        names += [(a.asname or a.name, False) for a in node.names if a.name != "*"]
-                    for name, defined in names:
-                        if not name.startswith("_"):
-                            exports.setdefault(name, []).append((module, defined))
+                for name, defined in _public_names(file):
+                    exports.setdefault(name, []).append((module, defined))
     return top, exports
 
 
