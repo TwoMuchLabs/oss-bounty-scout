@@ -79,7 +79,8 @@ def render(r: TriageResult) -> str:
 
     if r.plan and r.plan.test_content:
         ext = (r.plan.test_filename or "").rsplit(".", 1)[-1]
-        out += ["### Failing test", "", f"`{r.plan.test_filename}`, run as `{r.plan.command.replace("{test_file}", r.plan.test_filename)}`:", "",
+        shown = r.plan.command.replace("{test_file}", r.plan.test_filename)
+        out += ["### Failing test", "", f"`{r.plan.test_filename}`, run as `{shown}`:", "",
                 _fence(r.plan.test_content, _EXT_LANG.get(ext, "")), ""]
     elif r.plan:
         out += ["### Failing test", "", f"Command: `{r.plan.command}`", ""]
