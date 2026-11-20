@@ -216,6 +216,15 @@ class BisectTests(RepoCase):
         self.assertEqual(result.status, "ambiguous")
         self.assertIn(self.info["culprit"], [c.sha for c in result.candidates])
 
+    def test_gives_up_when_too_many_commits_cannot_be_tested(self):
+        check = "test ! -e statskit/util0.py || test -e statskit/later5.py || exit 3; " + self.CHECK
+        spec = CheckSpec(command=check, signature_pattern="ZeroDivisionError", max_skips=2)
+        result = bisect_mod.bisect(self.repo, "v1.1.0", "HEAD", spec)
+        self.assertEqual(result.status, "abandoned", result.detail)
+        self.assertLessEqual(len(result.steps), 4)
+        self.assertIn("could not be tested", result.detail)
+        self.assertEqual(self.worktrees(), 1)
+
     def test_candidate_good_refs_prefer_reporter_hint(self):
         refs = bisect_mod.candidate_good_refs(self.repo, "HEAD", ["1.0.0"])
         self.assertEqual(refs[0], "v1.0.0")
@@ -241,6 +250,19 @@ class TriageTests(RepoCase):
             self.assertIn(expected, report)
         self.assertEqual(self.worktrees(), 1)
         self.assertEqual(git(self.repo, "status", "--porcelain").stdout, "")
+
+    def test_patch_is_merged_when_later_commits_touched_the_same_file(self):
+        work = Path(tempfile.mkdtemp(prefix="scout-3way-"))
+        info = fixture.build(work / "statskit", commits_after=2)
+        core = info["repo"] / "statskit" / "core.py"
+        core.write_text(core.read_text().replace("return max(values) - min(values)", "return max(values) - min(values)  # range"))
+        subprocess.run(["git", "-C", str(info["repo"]), "-c", "user.name=F", "-c", "user.email=f@e.x",
+                        "commit", "-qam", "Comment spread()"], check=True)
+        result = triage(info["repo"], fixture.issue())
+        self.assertEqual(result.bisect.culprit.sha, info["culprit"])
+        self.assertEqual(result.fix.status, "verified")
+        self.assertIn("+    if not values:", result.fix.diff)
+        self.assertNotIn("# range", "".join(l for l in result.fix.diff.splitlines() if l.startswith(("+", "-"))))
 
     def test_untrusted_issue_code_is_not_executed(self):
         marker = Path(self._tmp.name) / "pwned"

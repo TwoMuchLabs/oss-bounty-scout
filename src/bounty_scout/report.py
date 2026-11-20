@@ -66,7 +66,7 @@ def render(r: TriageResult) -> str:
     if r.notes or (b and b.detail):
         out += ["### Notes", ""] + [f"- {n}" for n in r.notes]
         if b and b.detail:
-            out.append(f"- {b.detail}" if b.status == "ambiguous" else f"- Bisect did not finish: {_safe(b.detail)[:500]}")
+            out.append(f"- {b.detail}" if b.status in ("ambiguous", "abandoned") else f"- Bisect did not finish: {_safe(b.detail)[:500]}")
         out.append("")
 
     if r.fix:

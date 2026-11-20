@@ -167,6 +167,7 @@ def summarise(data: dict, rows: list[dict]) -> dict:
         "reproduced_but_still_fails_after_fix": count(lambda r: r.get("after_fix") == "reproduced"),
         "culprit_found": count(lambda r: r.get("bisect") == "found"),
         "culprit_ambiguous": count(lambda r: r.get("bisect") == "ambiguous"),
+        "bisect_abandoned": count(lambda r: r.get("bisect") in ("abandoned", "failed")),
         "no_good_baseline": count(lambda r: r.get("status") == "reproduced" and not r.get("bisect")),
         "culprit_named_in_thread": count(lambda r: r.get("culprit_in_thread")),
         "suspect_file_scored": count(lambda r: "suspect_in_fix" in r),

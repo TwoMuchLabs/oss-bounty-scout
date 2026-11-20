@@ -142,19 +142,32 @@ def suggest_fix(repo: str | Path, culprit: str, bad: str, suspect: Suspect | Non
         diff = _revert_diff(repo, culprit, file)
         if not diff.strip():
             continue
-        status = _verify(repo, bad, diff, spec) if spec else "unverified"
-        fix = Fix(diff, scope, status)
-        if status in ("verified", "unverified"):
+        if not spec:
+            return Fix(diff, scope, "unverified")
+        status, applied = _verify(repo, bad, diff, spec)
+        fix = Fix(applied or diff, scope, status)
+        if status == "verified":
             return fix
         first = first or fix
     return first
 
 
-def _verify(repo: str | Path, bad: str, diff: str, spec: CheckSpec) -> str:
+def _verify(repo: str | Path, bad: str, diff: str, spec: CheckSpec) -> tuple[str, str | None]:
+    """Apply the revert to ``bad`` and re-run the reproduction.
+
+    Returns the status and the patch as it applies to ``bad``. Later commits
+    often touched the same file, so a plain apply is followed by a three-way
+    merge; only a clean merge counts.
+    """
     with Worktree(repo, bad) as wt:
         patch = wt.path.parent / "fix.patch"
         patch.write_text(diff)
-        if git(wt.path, "apply", "--check", str(patch), check=False).returncode != 0:
-            return "does-not-apply"
-        git(wt.path, "apply", str(patch))
-        return "verified" if evaluate(spec, wt.path).status == GOOD else "still-fails"
+        if git(wt.path, "apply", "--check", str(patch), check=False).returncode == 0:
+            git(wt.path, "apply", str(patch))
+        elif git(wt.path, "apply", "--3way", str(patch), check=False).returncode != 0:
+            return "does-not-apply", None
+        applied = git(wt.path, "diff", "--no-color", "--no-ext-diff", "HEAD").stdout
+        if not applied.strip():
+            return "does-not-apply", None
+        status = "verified" if evaluate(spec, wt.path, clean=False).status == GOOD else "still-fails"
+        return status, applied

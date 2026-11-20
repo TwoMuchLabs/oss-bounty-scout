@@ -57,6 +57,7 @@ class CheckSpec:
     docker_network: str = "none"
     pass_env: list[str] = field(default_factory=list)
     log_path: str | None = None
+    max_skips: int = 20  # give up bisecting once this many commits in the range could not be tested
 
     def dump(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2))

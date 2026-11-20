@@ -9,11 +9,12 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .repro import BAD, EXIT_CODES, GOOD, CheckSpec, Verdict, evaluate
+from .repro import BAD, EXIT_CODES, GOOD, SKIP, CheckSpec, Verdict, evaluate
 from .runner import GitError, Worktree, git
 
 # git < 2.4x prints "is the first bad commit"; newer releases quote the term: "is the first 'bad' commit".
 _FIRST_BAD = re.compile(r"^([0-9a-f]{40,64}) is the first '?bad'? commit", re.M)
+ABORT = 200  # any exit code above 127 makes `git bisect run` stop
 _SHA_LINE = re.compile(r"^([0-9a-f]{40,64})$", re.M)
 
 # ``git bisect run`` invokes this with the worktree as cwd. ``-I`` keeps the
@@ -39,7 +40,7 @@ class Commit:
 
 @dataclass
 class BisectResult:
-    status: str  # "found" | "ambiguous" | "failed"
+    status: str  # "found" | "ambiguous" | "abandoned" | "failed"
     good: str
     bad: str
     culprit: Commit | None = None
@@ -118,9 +119,14 @@ def predicate_main(spec_path: str) -> int:
     verdict = evaluate(spec, Path.cwd())
     if spec.log_path:
         sha = git(Path.cwd(), "rev-parse", "HEAD").stdout.strip()
-        with open(spec.log_path, "a") as fh:
+        log = Path(spec.log_path)
+        skipped = log.read_text().count('"verdict": "skip"') if log.exists() else 0
+        with open(log, "a") as fh:
             fh.write(json.dumps({"sha": sha, "verdict": verdict.status, "reason": verdict.reason,
                                  "seconds": round(verdict.result.duration, 2)}) + "\n")
+        if verdict.status == SKIP and skipped + 1 > spec.max_skips:
+            # With this many untestable commits git falls back to trying them one by one. Stop instead.
+            return ABORT
     return EXIT_CODES[verdict.status]
 
 
@@ -169,6 +175,11 @@ def bisect(repo: str | Path, good: str, bad: str, spec: CheckSpec, first_parent:
         result.status = "ambiguous"
         result.candidates = [describe(repo, sha) for sha in _SHA_LINE.findall(tail)]
         result.detail = "Some commits could not be tested, so the first bad commit is one of several."
+    elif sum(1 for step in result.steps if step["verdict"] == SKIP) > spec.max_skips:
+        result.status = "abandoned"
+        result.detail = (f"More than {spec.max_skips} commits between `{good}` and the failing commit could not be tested "
+                         "(they fail for other reasons, such as needing an older runtime), so the search was stopped. "
+                         "Pass a more recent `--good` ref to narrow the range.")
     else:
         result.detail = output.strip()[-2000:] or "git bisect run produced no result"
     return result
