@@ -387,6 +387,18 @@ def resolve_imports(names: list[str], top: set[str], exports: dict[str, list[tup
     return lines
 
 
+def _unimported_submodules(snippet: str, top: set[str], exports: dict[str, list[tuple[str, bool]]]) -> list[str]:
+    """ "import pkg" followed by "pkg.sub.thing" fails unless the package imports that submodule itself."""
+    try:
+        tree = ast.parse(snippet)
+    except (SyntaxError, ValueError):
+        return []
+    _, attrs = _usage(snippet)
+    modules = {m for found in exports.values() for m, _ in found}
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names if not a.asname}
+    return [line for name in sorted(imported & top) for line in _submodule_imports(name, attrs, modules)]
+
+
 def complete_imports(plan: ReproPlan, worktree: str | Path) -> None:
     """Add imports for names the snippet uses without importing, when the project or stdlib clearly provides them."""
     if plan.source != "python-snippet" or not plan.snippet:
@@ -394,18 +406,7 @@ def complete_imports(plan: ReproPlan, worktree: str | Path) -> None:
     names = missing_names(plan.snippet)
     top, exports = project_index(Path(worktree))
     lines = resolve_imports(names, top, exports, plan.snippet) if names else []
-    # "import pkg" followed by "pkg.sub.thing" fails unless the package imports that submodule itself.
-    try:
-        tree = ast.parse(plan.snippet)
-    except (SyntaxError, ValueError):
-        tree = None
-    if tree:
-        _, attrs = _usage(plan.snippet)
-        modules = {m for found in exports.values() for m, _ in found}
-        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names if not a.asname}
-        for name in sorted(imported & top):
-            lines += [f"import {name}.{a}" for a in sorted(attrs.get(name, ())) if f"{name}.{a}" in modules]
-    lines = list(dict.fromkeys(lines))
+    lines = list(dict.fromkeys(lines + _unimported_submodules(plan.snippet, top, exports)))
     if lines:
         number = int(re.search(r"\d+", plan.test_filename).group())
         plan.test_content = _python_test(number, plan.snippet, lines)
