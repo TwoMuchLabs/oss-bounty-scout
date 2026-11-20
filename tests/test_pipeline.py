@@ -142,6 +142,14 @@ class MatchingTests(unittest.TestCase):
         self.assertTrue(error_matches("ParseException: Expected stringEnd", None,
                                       "pyparsing.exceptions.ParseException: Expected stringEnd, found '('"))
 
+    def test_pytest_assert_details_and_reordered_dicts(self):
+        self.assertTrue(error_matches("AssertionError: assert '' == 'Info log from the default logger.'", None,
+                                      "Traceback ...\nAssertionError"))
+        self.assertFalse(error_matches("ValueError: bad value given", None, "ValueError"))
+        want = "ValidationError: {'iban_data': {'auto_withdrawal_bank_account_id': ['Missing data for required field.'], 'deposit_bank_account_id': ['Missing data for required field.']}}"
+        got = "marshmallow.exceptions.ValidationError: {'iban_data': {'deposit_bank_account_id': ['Missing data for required field.'], 'auto_withdrawal_bank_account_id': ['Missing data for required field.']}}"
+        self.assertTrue(error_matches(want, None, got))
+
     def test_a_different_error_is_not_a_match(self):
         self.assertFalse(error_matches("KeyError: 'a'", None, "NameError: name 'click' is not defined"))
         self.assertFalse(error_matches("TypeError: 'int' object is not iterable", None,
@@ -196,8 +204,12 @@ class PlanTests(RepoCase):
         self.assertIn("test_empty()\n", result.plan.test_content)
 
     def test_tests_that_need_fixtures_are_run_with_pytest(self):
-        plan = self.plan_for("```python\ndef test_x(tmp_path):\n    assert 0\n```\n\nAssertionError")
+        plan = self.plan_for("```python\ndef test_x(tmp_path):\n    assert 0\n```\n\n```\nFAILED t.py::test_x - assert 0\n```")
         self.assertEqual(plan.command, "python3 -m pytest -q -x -p no:cacheprovider {test_file}")
+        self.assertEqual(plan.signature, "AssertionError: assert 0")
+        # without pytest output in the report, a function that merely looks like a test is left alone
+        quiet = self.plan_for("```python\ndef test_x(tmp_path):\n    assert 0\nraise KeyError('k')\n```\n\nKeyError: 'k'")
+        self.assertEqual(quiet.command, "python3 {test_file}")
         own = self.plan_for("```python\ndef test_x():\n    assert 0\ntest_x()\n```\n\nAssertionError")
         self.assertEqual(own.command, "python3 {test_file}")
         self.assertNotIn("# added", own.test_content)

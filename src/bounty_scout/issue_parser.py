@@ -106,6 +106,7 @@ class ParsedIssue:
     expected: str = ""
     actual: str = ""
     missing: list[str] = field(default_factory=list)
+    pytest_output: bool = False  # the logs are pytest's, so the snippet is meant to be collected by pytest
     kind: str = "runtime"  # "type-check" when the report is about a type checker's output, not about running code
 
     def to_dict(self) -> dict:
@@ -180,9 +181,17 @@ def _classify(lang: str, text: str, section: str) -> str:
     return "unknown"
 
 
+_PYTEST_ASSERT = re.compile(r"^(?:FAILED|ERROR) \S+ - (assert .+)$", re.M)
+_PYTEST_OUTPUT = re.compile(r"^(?:FAILED|ERROR) \S+::|^=+ (?:FAILURES|ERRORS|short test summary info) =+|^E   ", re.M)
+
+
 def extract_signature(texts: list[str]) -> str | None:
     """Pick the most specific error line: a typed exception, then a panic, then a generic error."""
     for text in texts:
+        if not _TYPED_ERROR.search(text):
+            short = _PYTEST_ASSERT.search(text)  # pytest's summary drops the "AssertionError:" prefix
+            if short:
+                return f"AssertionError: {short.group(1).strip()}"
         typed = list(_TYPED_ERROR.finditer(text))
         if typed:
             m = typed[-1]  # last one is the root cause in Python and Java chains
@@ -293,6 +302,7 @@ def parse_issue(raw: dict) -> ParsedIssue:
     issue.good_hints = _dedupe([m.group("ref") for m in _GOOD_HINT.finditer(text)])
     issue.bad_hints = _dedupe([m.group("ref") for m in _BAD_HINT.finditer(text) if m.group("ref") not in issue.good_hints])
 
+    issue.pytest_output = bool(_PYTEST_OUTPUT.search("\n".join(issue.error_logs) or body))
     signature = issue.error_signature or ""
     if not _TYPED_ERROR.match(signature) and _TYPE_CHECK.search("\n".join(issue.error_logs) or body) and (
             signature.lower().startswith("error:") or re.search(r"\.pyi?:\d+(?::\d+)?:\s*error:", body)):

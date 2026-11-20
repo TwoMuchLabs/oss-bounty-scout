@@ -57,7 +57,7 @@ jobs:
       - run: pip install .
       - name: Build an image that already holds the project's dependencies
         run: |
-          printf 'FROM python:3.12-slim\nRUN pip install --no-cache-dir %s || true\n' "${{ matrix.deps }}" > "$RUNNER_TEMP/Dockerfile"
+          printf 'FROM python:3.12-slim\nRUN pip install --no-cache-dir pytest %s || true\n' "${{ matrix.deps }}" > "$RUNNER_TEMP/Dockerfile"
           docker build -q -t scout-field -f "$RUNNER_TEMP/Dockerfile" "$RUNNER_TEMP"
       - name: Fetch closed issues
         env:

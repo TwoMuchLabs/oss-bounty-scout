@@ -122,7 +122,7 @@ def _pick_block(issue: ParsedIssue, kind: str):
     return ordered[0] if ordered else None
 
 
-def _pytest_style(snippet: str) -> tuple[str, str, str | None]:
+def _pytest_style(snippet: str, pytest_output: bool = False) -> tuple[str, str, str | None]:
     """A snippet that only *defines* ``test_`` functions does nothing when run as a script.
 
     Call them ourselves when they take no arguments; otherwise they need pytest's fixtures.
@@ -141,6 +141,8 @@ def _pytest_style(snippet: str) -> tuple[str, str, str | None]:
         return snippet, plain, None  # the snippet already runs its own tests
     needs_pytest = classes or any(
         t.args.args or t.args.kwonlyargs or t.decorator_list or isinstance(t, ast.AsyncFunctionDef) for t in tests)
+    if needs_pytest and not pytest_output:
+        return snippet, plain, None  # nothing says the reporter used pytest: run it the way it reads
     if needs_pytest:
         return (snippet, "python3 -m pytest -q -x -p no:cacheprovider {test_file}",
                 "The snippet defines tests that need pytest (fixtures, parameters or classes), so it was run with pytest.")
@@ -162,7 +164,7 @@ def build_plan(issue: ParsedIssue, test_cmd: str | None = None, match: str | Non
 
     block = _pick_block(issue, "python")
     if block:
-        snippet, command, note = _pytest_style(block.text)
+        snippet, command, note = _pytest_style(block.text, issue.pytest_output)
         plan = ReproPlan("python-snippet", command, f"test_issue_{n}.py",
                          _python_test(n, snippet), signature, uses_issue_code=True, snippet=snippet)
         if note:
@@ -394,11 +396,18 @@ def error_matches(signature: str | None, pattern: str | None, output: str) -> bo
         if found.group("type").split(".")[-1] != want_type:
             continue
         got_msg = _mask(found.group("msg") or "")
-        if not want_msg or not got_msg:
-            if not want_msg:
-                return True  # the report gave only the exception type
+        if not want_msg:
+            return True  # the report gave only the exception type
+        if not got_msg:
+            # pytest prints the compared values ("assert 1 == 2"); a plain run of the same assert prints nothing.
+            if want_type == "AssertionError" and want_msg.startswith("assert "):
+                return True
             continue
         if want_msg in got_msg or got_msg in want_msg or difflib.SequenceMatcher(None, want_msg, got_msg).ratio() >= 0.6:
+            return True
+        # Dict and set contents print in varying order: compare the words regardless of order.
+        want_words, got_words = set(re.findall(r"\w+", want_msg)), set(re.findall(r"\w+", got_msg))
+        if len(want_words) >= 6 and len(want_words & got_words) / len(want_words | got_words) >= 0.6:
             return True
     return False
 
