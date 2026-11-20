@@ -59,9 +59,11 @@ The same check is used to confirm the bug, find a good baseline, drive `git bise
 - **good**: the command exits 0 without it
 - **skip**: setup failed, the run timed out, or it failed with a *different* error
 
-The reporter's snippet is run exactly as written. Two things are done for it first, both from a static read of your code (nothing is imported or executed): imports the snippet forgot (`import os`, `from yourpkg import Thing`) are added and listed in the report, and `python app.py --flag` in the report keeps its arguments.
+The reporter's snippet is run exactly as written, with a few things people leave out filled in from a static read of your code (nothing of yours is imported or executed), each listed in the report: forgotten imports (`import os`, `from typing import Optional`, `from yourpkg import Thing`, `import yourpkg.sub`); the arguments from `python app.py --flag`; calls to test functions the snippet defines but never calls; and pytest, when the report shows pytest output.
 
-Report statuses: `reproduced`, `not-reproduced`, `inconclusive` (failed differently), `needs-info` (nothing runnable in the issue), `needs-approval` (see below).
+Report statuses: `reproduced`, `not-reproduced`, `inconclusive` (failed differently), `needs-info` (nothing runnable in the issue), `needs-approval` (see below), `unsupported` (the report is about a type checker's output, not about running code).
+
+A reproduced bug is also classed as a regression or not. If no earlier version passes the test, the report says whether that is because the oldest testable version already fails (probably not a regression) or because older versions could not be run at all.
 
 ## Optional AI help
 
@@ -109,32 +111,35 @@ Copy [`templates/bounty-scout.yml`](templates/bounty-scout.yml) to `.github/work
 
 ## How well does it work?
 
-We replayed closed issues from eight public Python projects (click, jinja, werkzeug, attrs, marshmallow, rich, tomlkit, packaging) as if each had just been opened: the scout ran at the commit that was current that day, in the Docker sandbox, on GitHub's runners. Then we scored it against what the maintainers actually did. Run of 20 November 2026:
+We replay closed issues from eight public Python projects (click, jinja, werkzeug, attrs, marshmallow, rich, tomlkit, packaging) as if each had just been opened: the scout runs at the commit that was current that day, in the Docker sandbox, on GitHub's runners. Then we score it against what the maintainers actually did. Latest run, 20 November 2026, AI off:
 
 | | |
 |---|---|
 | Closed issues scanned | 2,317 |
-| Had a Python snippet and an error to match | 213 |
-| **Reproduced** | **79** |
-| Ran cleanly (bug not on the main branch that day, or not triggered) | 51 |
-| Failed for another reason | 83, of which 41 needed a third-party package the sandbox did not have |
-| Reproductions we could check against the maintainers' fix | 66, of which **46 pass once the fix is in** |
-| **Culprit commit found** | **21** (median: 7 test runs to search 117 commits) |
-| No earlier version where it worked | 52 (not a regression, or older versions no longer run) |
-| Search stopped or narrowed to a few commits | 6 |
-| Suspect file is a file the maintainers' fix changed | **12 of 16** that could be scored |
-| Suggested patch applied and made the test pass | 5 of 21 |
+| Had a Python snippet and an error to match | 225 |
+| **Reproduced** | **88** |
+| Ran cleanly (bug not on the main branch that day, or not triggered) | 47 |
+| Failed for another reason | 84, of which 43 needed a third-party package the sandbox did not have |
+| About a type checker's output, so set aside | 6 |
+| Reproductions where the commit that closed the issue is known | 53: in **42** the test passes once that fix is in, in 7 it still fails, 4 unclear |
+| Regressions (an earlier version passes the test) | 29 of the 88 |
+| Not regressions (the oldest testable version already fails) | 58 |
+| **Culprit commit found** | **23** of the 29 (median: 7 test runs to search 117 commits); 5 stopped, 1 narrowed to a few commits |
+| Suspect file is a file the maintainers' fix changed | **12 of 17** culprit cases that could be scored |
+| Suggested patch applied and made the test pass | 8 of 23, six of them by undoing a single hunk |
 
-Read it this way: about one closed issue in ten carries something runnable, a bit over a third of those reproduce unattended, and about a quarter of the reproduced ones get a culprit commit. Two of the 21 culprits are named by maintainers in the issue thread; the others have not been independently confirmed, though titles such as "remove deprecated Markup and escape aliases" for "cannot import name 'escape'" speak for themselves. The patch is the weak part: a revert usually no longer applies once the file has moved on.
+Read it this way: about one closed issue in ten carries something runnable, and four in ten of those reproduce unattended. Most reproduced bugs are not regressions, and the report now says so. When one is a regression, the culprit is found four times in five. Two of the 23 culprits are named by maintainers in the issue thread; the others have not been independently confirmed, though titles such as "remove deprecated Markup and escape aliases" for "cannot import name 'escape'" speak for themselves. The patch is still the weak part.
 
-The first replay did worse (59 reproduced, 13 culprits) and showed why. Those fixes are in this version. Reproduce the numbers with the `Field test` workflow, or `fieldtest/field_test.py`.
+The seven reproductions that still fail after the known fix are the ones to distrust: either the issue was closed by a commit that did something else, or the test is catching a different problem than the one reported.
+
+Each round of reading the failures has moved the numbers: 59 reproduced and 13 culprits on the first replay, then 79 and 21, now 88 and 23. The replay runs on every change to the tool and fails if a culprit it used to find is lost (`fieldtest/golden.json`). Reproduce it with the `Field test` workflow, or `fieldtest/field_test.py`.
 
 ## Limits
 
 - Reproduction needs a runnable Python or Node snippet, shell commands, or your `--test-cmd`. Bugs that show up as wrong output rather than an error need `--test-cmd`.
 - The sandbox image needs your project's dependencies, and anything else the snippet imports.
 - The failing test is the reporter's snippet; it is not minimised.
-- The suggested fix is a revert of the culprit's change (to the suspect file, else the whole commit), merged onto the failing commit when it can be. It restores old behaviour and is a starting point for a real fix.
+- The suggested fix undoes the culprit's change: one hunk if that is enough, else the suspect file, else the whole commit, merged onto the failing commit when it can be. It restores old behaviour and is a starting point for a real fix.
 - Bisecting stops when more than 20 commits in the range cannot be tested. Pass a nearer `--good`.
 - Field-tested on Python projects only. Node snippets and shell steps have unit tests but no field test. POSIX only.
 

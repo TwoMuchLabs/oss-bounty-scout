@@ -4,13 +4,15 @@
     "pallets/werkzeug": {
       "2706": "082e0e5b9c01fa3178ac0153413f082616f10914",
       "2465": "88125beebc6463e571cef3ca84eccfad0c818ae3",
-      "2359": "7fff62feaaa5ae398d443ecf4349adc826d7da6a"
+      "2359": "7fff62feaaa5ae398d443ecf4349adc826d7da6a",
+      "2518": "5a7c0dec029d296a5e8131c8db51ce19e28c0c58"
     },
     "python-poetry/tomlkit": {
       "476": "7f237d8f5d07d23422571e9daaf411f4a2356855",
       "405": "ad7dfe0c96b509f0508cdd8469a33dca3797a7d3",
       "184": "ced852cc60445076a223d9df3a34867cfc701dcc",
-      "124": "b29cdf0cddec5a3fc773e49ef991eaf43f0c3d24"
+      "124": "b29cdf0cddec5a3fc773e49ef991eaf43f0c3d24",
+      "411": "be2050ef3202d20f80b1c555d6c7205058024f38"
     },
     "python-attrs/attrs": {
       "1327": "f5683b852b1e7ec1f26aabbb55aad332de79066d",
