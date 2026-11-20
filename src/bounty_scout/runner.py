@@ -142,6 +142,7 @@ def compose_script(command: str, setup: str | None) -> str:
 def docker_argv(
     script: str, worktree: str | Path, repro_dir: str | Path | None, image: str,
     network: str = "none", env: dict[str, str] | None = None, name: str | None = None,
+    timeout: float | None = None,
 ) -> list[str]:
     argv = [
         "docker", "run", "--rm", "--network", network,
@@ -156,7 +157,9 @@ def docker_argv(
         argv += ["-v", f"{Path(repro_dir).resolve()}:/scout:ro"]
     for key, value in (env or {}).items():
         argv += ["-e", f"{key}={value}"]
-    return argv + [image, "sh", "-c", script]
+    # Enforce the time limit inside the container too, so a hung test does not wait on the outer grace period.
+    limit = ["timeout", "-k", "2", str(max(1, int(timeout)))] if timeout else []
+    return argv + [image, *limit, "sh", "-c", script]
 
 
 def run_isolated(
@@ -173,12 +176,14 @@ def run_isolated(
         if sandbox == "docker":
             inner = {"PYTHONPATH": "/work:/work/src", "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp", "CI": "1"}
             name = f"scout-{os.getpid()}-{int(time.time() * 1000) % 10**9}"
-            argv = docker_argv(script, worktree, repro_dir, docker_image, docker_network, inner, name)
+            argv = docker_argv(script, worktree, repro_dir, docker_image, docker_network, inner, name, timeout)
             # The docker CLI needs the caller's HOME/DOCKER_* to find the daemon; the container sees none of it.
             env = scrubbed_env(os.environ.get("HOME", str(home)), pass_env=["DOCKER_HOST", "DOCKER_CONTEXT", "XDG_RUNTIME_DIR"])
-            result = run(argv, worktree, env, timeout + 30)
+            result = run(argv, worktree, env, timeout + 60)  # grace for image pull and container start
             if result.timed_out:
                 subprocess.run(["docker", "kill", name], capture_output=True)
+            elif result.exit_code in (124, 137):  # coreutils timeout: TERM, then KILL
+                result.timed_out = True
             return result
         if sandbox != "worktree":
             raise ValueError(f"unknown sandbox {sandbox!r} (expected 'worktree' or 'docker')")

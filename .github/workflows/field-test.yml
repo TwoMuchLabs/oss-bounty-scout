@@ -1,0 +1,66 @@
+# Replays closed issues from public projects through the scout, in the Docker sandbox.
+# See fieldtest/field_test.py for how results are scored.
+name: Field test
+
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: Pages of 100 closed issues to scan per project
+        default: "3"
+  push:
+    branches: [main]
+    paths: ["fieldtest/**", ".github/workflows/field-test.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { repo: pallets/click, deps: "" }
+          - { repo: pallets/jinja, deps: "markupsafe" }
+          - { repo: pallets/werkzeug, deps: "markupsafe" }
+          - { repo: python-attrs/attrs, deps: "" }
+          - { repo: marshmallow-code/marshmallow, deps: "packaging" }
+          - { repo: Textualize/rich, deps: "markdown-it-py pygments" }
+          - { repo: python-poetry/tomlkit, deps: "" }
+          - { repo: pypa/packaging, deps: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: Build an image that already holds the project's dependencies
+        run: |
+          printf 'FROM python:3.12-slim\nRUN pip install --no-cache-dir %s || true\n' "${{ matrix.deps }}" > "$RUNNER_TEMP/Dockerfile"
+          docker build -q -t scout-field -f "$RUNNER_TEMP/Dockerfile" "$RUNNER_TEMP"
+      - name: Fetch closed issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python fieldtest/field_test.py fetch "${{ matrix.repo }}" "$RUNNER_TEMP/issues.json" --pages "${{ inputs.pages || '3' }}"
+      # No token below this line: issue code runs here, inside a container with no network.
+      - name: Replay
+        run: |
+          python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --image scout-field
+          cat "$RUNNER_TEMP/out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Artifact name
+        if: always()
+        run: echo "SAFE_NAME=$(echo '${{ matrix.repo }}' | tr '/' '-')" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: field-${{ env.SAFE_NAME }}
+          path: ${{ runner.temp }}/out/

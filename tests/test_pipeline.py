@@ -71,6 +71,45 @@ class RunnerTests(RepoCase):
         self.assertEqual(argv[-3:], ["sh", "-c", "python3 /scout/t.py"])
 
 
+def _docker_ready() -> bool:
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+@unittest.skipUnless(_docker_ready(), "needs a running Docker daemon")
+class DockerTests(RepoCase):
+    """The full pipeline inside the real container sandbox."""
+
+    def test_end_to_end_in_container_without_network(self):
+        cfg = Config(sandbox="docker", docker_image="python:3.12-slim")
+        result = triage(self.repo, fixture.issue(association="NONE"), cfg)  # untrusted author is fine in docker
+        self.assertEqual(result.status, "reproduced", result.head and result.head.result.output)
+        self.assertEqual(result.bisect.culprit.sha, self.info["culprit"])
+        self.assertEqual(result.suspect.location, "statskit/core.py:7")
+        self.assertEqual(result.fix.status, "verified")
+        self.assertEqual(git(self.repo, "status", "--porcelain").stdout, "")
+
+    def test_container_has_no_network_token_or_root(self):
+        os.environ["GH_TOKEN"] = "secret-token"
+        probe = ("import os, socket\nprint('uid', os.getuid(), 'token', os.environ.get('GH_TOKEN'))\n"
+                 "try:\n    socket.create_connection(('1.1.1.1', 53), 3); print('NETWORK-UP')\n"
+                 "except OSError as e:\n    print('network-blocked')\n")
+        with tempfile.TemporaryDirectory() as tmp, Worktree(self.repo, "HEAD") as wt:
+            os.chmod(tmp, 0o755)
+            (Path(tmp) / "probe.py").write_text(probe)
+            result = run_isolated("python3 /scout/probe.py", wt.path, sandbox="docker", repro_dir=tmp)
+        self.assertIn("token None", result.output)
+        self.assertIn("network-blocked", result.output)
+        self.assertNotIn("uid 0 ", result.output)
+
+    def test_timeout_stops_the_container(self):
+        with Worktree(self.repo, "HEAD") as wt:
+            result = run_isolated("sleep 300", wt.path, sandbox="docker", timeout=3)
+        self.assertTrue(result.timed_out)
+
+
 class ClassifyTests(unittest.TestCase):
     def test_signature_decides(self):
         pattern = signature_pattern("IndexError: list index 3 out of range at 0x7f00aa")
