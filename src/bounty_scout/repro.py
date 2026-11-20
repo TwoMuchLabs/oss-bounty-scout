@@ -358,25 +358,32 @@ def _stdlib_import(name: str, called: set[str], used: set[str]) -> str:
     return f"import {name}"
 
 
+def _submodule_imports(name: str, attrs: dict[str, set[str]], modules: set[str]) -> list[str]:
+    """ "pkg.sub.thing" needs "import pkg.sub" unless the package imports the submodule itself."""
+    return [f"import {name}.{a}" for a in sorted(attrs.get(name, ())) if f"{name}.{a}" in modules]
+
+
+def _project_import(name: str, top: set[str], found: list[tuple[str, bool]]) -> str:
+    """Prefer the public face: a top-level package that exposes the name, else the shallowest definition."""
+    public = [m for m, _ in found if m in top]
+    defined = sorted((m for m, d in found if d), key=lambda m: (m.count("."), m))
+    module = (public or defined or [found[0][0]])[0]
+    return f"from {module} import {name}"
+
+
 def resolve_imports(names: list[str], top: set[str], exports: dict[str, list[tuple[str, bool]]], code: str = "") -> list[str]:
     lines = []
     called, attrs = _usage(code) if code else (set(), {})
     modules = {m for found in exports.values() for m, _ in found}
     for name in names:
         if name in top:
-            lines.append(f"import {name}")
-            # "pkg.sub.thing" needs "import pkg.sub" unless the package imports the submodule itself.
-            lines += [f"import {name}.{a}" for a in sorted(attrs.get(name, ())) if f"{name}.{a}" in modules]
+            lines += [f"import {name}"] + _submodule_imports(name, attrs, modules)
         elif name in sys.stdlib_module_names:
             lines.append(_stdlib_import(name, called, attrs.get(name, set())))
-        elif name not in exports and name in _KNOWN_NAMES:
-            lines.append(f"from {_KNOWN_NAMES[name]} import {name}")
         elif name in exports:
-            # Prefer the public face: a top-level package that exposes the name, else the shallowest definition.
-            public = [m for m, _ in exports[name] if m in top]
-            defined = sorted((m for m, d in exports[name] if d), key=lambda m: (m.count("."), m))
-            module = (public or defined or [exports[name][0][0]])[0]
-            lines.append(f"from {module} import {name}")
+            lines.append(_project_import(name, top, exports[name]))
+        elif name in _KNOWN_NAMES:
+            lines.append(f"from {_KNOWN_NAMES[name]} import {name}")
     return lines
 
 
