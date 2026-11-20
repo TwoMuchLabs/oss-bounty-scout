@@ -259,11 +259,10 @@ def _dedupe(items: list[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-def parse_issue(raw: dict) -> ParsedIssue:
-    """Parse an issue as returned by the GitHub REST API (``gh api repos/O/R/issues/N``)."""
-    body = (raw.get("body") or "").replace("\r\n", "\n")
+def _new_issue(raw: dict) -> ParsedIssue:
+    """The fields GitHub states outright; the REST API and ``gh issue view --json`` spell some differently."""
     user = raw.get("user") or raw.get("author") or {}
-    issue = ParsedIssue(
+    return ParsedIssue(
         number=int(raw.get("number") or 0),
         title=raw.get("title") or "",
         url=raw.get("html_url") or raw.get("url") or "",
@@ -273,83 +272,116 @@ def parse_issue(raw: dict) -> ParsedIssue:
         labels=[l["name"] if isinstance(l, dict) else str(l) for l in raw.get("labels") or []],
     )
 
+
+def _segments(body: str):
+    """Yield ("code", language, text) for each fenced block and ("line", "", text) for every other line."""
+    fence, lang, lines = None, "", []
+    for line in body.split("\n"):
+        mark = _FENCE.match(line)
+        if fence is None:
+            if mark:
+                fence, lang, lines = mark.group("fence"), mark.group("lang"), []
+            else:
+                yield "line", "", line
+        elif mark and mark.group("fence")[0] == fence[0] and len(mark.group("fence")) >= len(fence) and not mark.group("lang"):
+            yield "code", lang, "\n".join(lines)
+            fence = None
+        else:
+            lines.append(line)
+    if fence is not None:  # unterminated fence: keep what we have
+        yield "code", lang, "\n".join(lines)
+
+
+def _add_list_item(issue: ParsedIssue, line: str, section: str, numbered_anywhere: list[str]) -> None:
+    item = _LIST_ITEM.match(line)
+    if not item:
+        return
+    if section == "repro":
+        issue.steps.append(item.group("item").strip())
+    elif re.match(r"^\s*\d+[.)]", line):
+        numbered_anywhere.append(item.group("item").strip())
+
+
+def _read_body(issue: ParsedIssue, body: str) -> tuple[dict[str, list[str]], list[str]]:
+    """File code blocks, steps and environment lines on the issue.
+
+    Returns the prose under each section, and numbered list items found outside "steps to reproduce".
+    """
     section, heading = "", ""
     prose: dict[str, list[str]] = {}
     numbered_anywhere: list[str] = []
-    fence, fence_lang, fence_lines = None, "", []
-
-    for line in body.split("\n"):
-        if fence is not None:
-            closing = _FENCE.match(line)
-            if closing and closing.group("fence")[0] == fence[0] and len(closing.group("fence")) >= len(fence) and not closing.group("lang"):
-                _add_block(issue, fence_lang, "\n".join(fence_lines), section)
-                fence = None
-            else:
-                fence_lines.append(line)
+    for kind, lang, text in _segments(body):
+        if kind == "code":
+            _add_block(issue, lang, text, section)
             continue
-        opening = _FENCE.match(line)
-        if opening:
-            fence, fence_lang, fence_lines = opening.group("fence"), opening.group("lang"), []
-            continue
-        h = _HEADING.match(line)
+        h = _HEADING.match(text)
         if h:
             heading = (h.group("h") or h.group("b")).strip()
             section = canonical_section(heading)
             prose.setdefault(section, [])
             continue
-        if not line.strip():
+        if not text.strip():
             continue
-        prose.setdefault(section, []).append(line)
-        item = _LIST_ITEM.match(line)
-        if item:
-            if section == "repro":
-                issue.steps.append(item.group("item").strip())
-            elif re.match(r"^\s*\d+[.)]", line):
-                numbered_anywhere.append(item.group("item").strip())
+        prose.setdefault(section, []).append(text)
+        _add_list_item(issue, text, section, numbered_anywhere)
         if section == "env":
-            _add_env_line(issue, heading, line)
-    if fence is not None:  # unterminated fence: keep what we have
-        _add_block(issue, fence_lang, "\n".join(fence_lines), section)
+            _add_env_line(issue, heading, text)
+    return prose, numbered_anywhere
 
-    if not issue.steps:
-        issue.steps = numbered_anywhere
-    for step in issue.steps:  # commands given inline, e.g. "run `pytest -k foo`"
-        m = re.search(r"\b(?:run|execute|call|invoke)\b[^`]*`([^`]+)`", step, re.I)
-        if m:
-            issue.shell_commands.append(m.group(1))
-    issue.shell_commands = _dedupe(issue.shell_commands)
 
+def _inline_commands(steps: list[str]) -> list[str]:
+    """Commands given inside a step, e.g. "run `pytest -k foo`"."""
+    found = (re.search(r"\b(?:run|execute|call|invoke)\b[^`]*`([^`]+)`", step, re.I) for step in steps)
+    return [m.group(1) for m in found if m]
+
+
+def _is_type_check(signature: str, logs: str, body: str) -> bool:
+    """Is the report about what a type checker printed, not about what running the code did?"""
+    if _TYPED_ERROR.match(signature) or not _TYPE_CHECK.search(logs):
+        return False
+    return bool(signature.lower().startswith("error:") or re.search(r"\.pyi?:\d+(?::\d+)?:\s*error:", body))
+
+
+def _missing(issue: ParsedIssue) -> list[str]:
+    missing = []
+    if not ([b for b in issue.code_blocks if b.kind in ("python", "javascript")] or issue.shell_commands):
+        missing.append("runnable reproduction (a code snippet or shell commands)")
+    if not issue.error_signature:
+        missing.append("error output or traceback")
+    if not issue.environment:
+        missing.append("environment details (OS, runtime and package versions)")
+    return missing
+
+
+def parse_issue(raw: dict) -> ParsedIssue:
+    """Parse an issue as returned by the GitHub REST API (``gh api repos/O/R/issues/N``)."""
+    body = (raw.get("body") or "").replace("\r\n", "\n")
+    issue = _new_issue(raw)
+    prose, numbered_anywhere = _read_body(issue, body)
+
+    issue.steps = issue.steps or numbered_anywhere
+    issue.shell_commands = _dedupe(issue.shell_commands + _inline_commands(issue.steps))
     issue.expected = "\n".join(prose.get("expected", [])).strip()
     issue.actual = "\n".join(prose.get("actual", [])).strip()
 
     issue.error_logs = _dedupe([log for log in issue.error_logs if log])
+    logs = "\n".join(issue.error_logs) or body
     issue.error_signature = extract_signature(issue.error_logs) or extract_signature([body])
-    frames_source = "\n".join(issue.error_logs) or body
-    issue.stack_frames = extract_frames(frames_source)
+    issue.stack_frames = extract_frames(logs)
 
     for key, pattern in _ENV_PATTERNS:
-        if key not in issue.environment:
-            m = pattern.search(body)
-            if m:
-                issue.environment[key] = m.group(1).strip()
+        m = None if key in issue.environment else pattern.search(body)
+        if m:
+            issue.environment[key] = m.group(1).strip()
 
     text = f"{issue.title}\n{body}"
     issue.good_hints = _dedupe([m.group("ref") for m in _GOOD_HINT.finditer(text)])
     issue.bad_hints = _dedupe([m.group("ref") for m in _BAD_HINT.finditer(text) if m.group("ref") not in issue.good_hints])
 
-    issue.pytest_output = bool(_PYTEST_OUTPUT.search("\n".join(issue.error_logs) or body))
-    signature = issue.error_signature or ""
-    if not _TYPED_ERROR.match(signature) and _TYPE_CHECK.search("\n".join(issue.error_logs) or body) and (
-            signature.lower().startswith("error:") or re.search(r"\.pyi?:\d+(?::\d+)?:\s*error:", body)):
+    issue.pytest_output = bool(_PYTEST_OUTPUT.search(logs))
+    if _is_type_check(issue.error_signature or "", logs, body):
         issue.kind = "type-check"
-
-    runnable = [b for b in issue.code_blocks if b.kind in ("python", "javascript")] or issue.shell_commands
-    if not runnable:
-        issue.missing.append("runnable reproduction (a code snippet or shell commands)")
-    if not issue.error_signature:
-        issue.missing.append("error output or traceback")
-    if not issue.environment:
-        issue.missing.append("environment details (OS, runtime and package versions)")
+    issue.missing = _missing(issue)
     return issue
 
 
