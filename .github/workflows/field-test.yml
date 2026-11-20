@@ -5,9 +5,9 @@ name: Field test
 on:
   workflow_dispatch:
     inputs:
-      pages:
-        description: Pages of 100 closed issues to scan per project
-        default: "3"
+      issues:
+        description: Closed issues to scan per project
+        default: "300"
   push:
     branches: [main]
     paths: ["fieldtest/**", ".github/workflows/field-test.yml"]
@@ -50,11 +50,11 @@ jobs:
       - name: Fetch closed issues
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python fieldtest/field_test.py fetch "${{ matrix.repo }}" "$RUNNER_TEMP/issues.json" --pages "${{ inputs.pages || '3' }}"
+        run: python fieldtest/field_test.py fetch "${{ matrix.repo }}" "$RUNNER_TEMP/issues.json" --issues "${{ inputs.issues || '300' }}"
       # No token below this line: issue code runs here, inside a container with no network.
       - name: Replay
         run: |
-          python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --image scout-field
+          python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --image scout-field --limit 80
           cat "$RUNNER_TEMP/out/summary.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Artifact name
         if: always()

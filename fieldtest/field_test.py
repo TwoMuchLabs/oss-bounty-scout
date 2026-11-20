@@ -8,7 +8,7 @@ things the project's own history tells us are then used to score it:
   issue was opened and pass once the maintainers' fix is in;
 * the files that fix touched: the scout's suspect file should be one of them.
 
-    field_test.py fetch OWNER/NAME issues.json [--pages 2]     # needs GH_TOKEN
+    field_test.py fetch OWNER/NAME issues.json [--issues 300]     # needs GH_TOKEN
     field_test.py run   REPO_PATH issues.json OUT_DIR --image IMAGE   # no token
 """
 
@@ -47,9 +47,12 @@ def is_candidate(raw: dict) -> bool:
 
 def cmd_fetch(args) -> int:
     issues = []
-    for page in range(1, args.pages + 1):
+    for page in range(1, args.pages + 1):  # the endpoint mixes in pull requests, so pages are mostly not issues
         batch = gh(f"repos/{args.repo}/issues?state=closed&sort=created&direction=desc&per_page=100&page={page}") or []
         issues += [i for i in batch if "pull_request" not in i and i.get("state_reason") in (None, "completed")]
+        if not batch or len(issues) >= args.issues:
+            break
+    issues = issues[: args.issues]
     candidates = [i for i in issues if is_candidate(i)]
     for raw in candidates:
         n = raw["number"]
@@ -107,7 +110,8 @@ def cmd_run(args) -> int:
             (out / "reports" / f"issue-{n}.md").write_text(render(result))
             row.update(status=result.status, bad=bad, good=result.good_ref,
                        signature=result.issue.error_signature,
-                       head_reason=result.head.reason if result.head else None)
+                       head_reason=result.head.reason if result.head else None,
+                       head_tail=result.head.result.output.strip().splitlines()[-2:] if result.head else None)
             b = result.bisect
             if b:
                 row.update(bisect=b.status, range=b.commits_in_range, steps=len(b.steps))
@@ -141,12 +145,12 @@ def cmd_run(args) -> int:
             row["error"] = f"{type(exc).__name__}: {exc}"[:300]
         row["seconds"] = round(time.monotonic() - started, 1)
         rows.append(row)
-        print(json.dumps({k: row.get(k) for k in ("issue", "status", "bisect", "suspect", "after_fix", "suspect_in_fix", "seconds")}), flush=True)
+        print("ROW " + json.dumps(row), flush=True)  # the log is the record; artifacts carry the full reports
 
     summary = summarise(data, rows)
     (out / "results.json").write_text(json.dumps({"repo": data["repo"], "summary": summary, "rows": rows}, indent=2))
     (out / "summary.md").write_text(markdown(data["repo"], summary, rows))
-    print(json.dumps(summary))
+    print("SUMMARY " + json.dumps({"repo": data["repo"], **summary}))
     return 0
 
 
@@ -184,7 +188,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("fetch")
-    p.add_argument("repo"); p.add_argument("output"); p.add_argument("--pages", type=int, default=2)
+    p.add_argument("repo"); p.add_argument("output"); p.add_argument("--pages", type=int, default=30)
+    p.add_argument("--issues", type=int, default=300, help="closed issues to scan")
     p.set_defaults(func=cmd_fetch)
     p = sub.add_parser("run")
     p.add_argument("repo_path"); p.add_argument("issues"); p.add_argument("out")
