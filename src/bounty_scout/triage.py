@@ -67,6 +67,42 @@ def _tail(text: str, lines: int = 25) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
+_NO_REPRODUCTION = "No runnable reproduction was found in the issue. Pass `--test-cmd` to supply one."
+
+
+def _assistant(cfg: Config, opts: Options):
+    """The AI model to consult, or None. Raises ValueError for a setting that cannot work."""
+    return ai_mod.from_settings(opts.ai or cfg.ai, opts.ai_model or cfg.ai_model, opts.ai_cmd or cfg.ai_command,
+                                cfg.ai_attempts, opts.ai_base_url or cfg.ai_base_url)
+
+
+def _maintainer_command(cfg: Config, opts: Options) -> str | None:
+    """A complete test command from the maintainer. (A configured ``test`` with ``{test_file}`` is a template, not a command.)"""
+    return opts.test_cmd or (cfg.test if cfg.test and "{test_file}" not in cfg.test else None)
+
+
+def _may_run(issue: ParsedIssue, cfg: Config, opts: Options, sandbox: str) -> bool:
+    """May code that comes from the issue text be executed?"""
+    return (
+        opts.trust_issue_code or sandbox == "docker"
+        or issue.author_association.upper() in {a.upper() for a in cfg.trusted_associations}
+    )
+
+
+def _plan(issue: ParsedIssue, cfg: Config, opts: Options, test_cmd: str | None) -> ReproPlan | None:
+    plan = build_plan(issue, test_cmd, opts.match)
+    if plan and plan.test_filename and cfg.test and "{test_file}" in cfg.test:
+        plan.command = cfg.test  # the maintainer's template for running a generated test file
+    return plan
+
+
+def _approval_note(plan: ReproPlan | None, issue: ParsedIssue) -> str:
+    what = ("The reproduction comes from the issue body" if plan else
+            "The report has no runnable code, and an AI-written test would be built from the issue text,")
+    return (f"{what} and its author is `{issue.author_association}`, so nothing was "
+            "executed. Review it, then re-run with `--trust-issue-code` or `--sandbox docker`.")
+
+
 def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None, options: Options | None = None) -> TriageResult:
     cfg, opts = config or Config(), options or Options()
     repo = Path(repo_path).resolve()
@@ -74,11 +110,10 @@ def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None,
     body = (raw_issue.get("body") or "").replace("\r\n", "\n")
     sandbox = opts.sandbox or cfg.sandbox
     result = TriageResult(issue, "needs-info", bad_ref=opts.bad, sandbox=sandbox)
-    ai = ai_mod.from_settings(opts.ai or cfg.ai, opts.ai_model or cfg.ai_model, opts.ai_cmd or cfg.ai_command,
-                               cfg.ai_attempts, opts.ai_base_url or cfg.ai_base_url)
+    ai = _assistant(cfg, opts)
     result.ai_label = ai.label if ai else None
 
-    test_cmd = opts.test_cmd or (cfg.test if cfg.test and "{test_file}" not in cfg.test else None)
+    test_cmd = _maintainer_command(cfg, opts)
     if issue.kind == "type-check" and not test_cmd:
         result.status = "unsupported"
         result.notes.append(
@@ -86,28 +121,17 @@ def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None,
             "nothing here for the scout to execute. Pass `--test-cmd` with your type-check command to bisect it anyway."
         )
         return result
-    plan = build_plan(issue, test_cmd, opts.match)
+    plan = _plan(issue, cfg, opts, test_cmd)
     if plan is None and not ai:
-        result.notes.append("No runnable reproduction was found in the issue. Pass `--test-cmd` to supply one.")
+        result.notes.append(_NO_REPRODUCTION)
         return result
-    if plan and plan.test_filename and cfg.test and "{test_file}" in cfg.test:
-        plan.command = cfg.test
     result.plan = plan
     if plan:
         result.notes += plan.notes
 
-    trusted = (
-        opts.trust_issue_code or sandbox == "docker"
-        or issue.author_association.upper() in {a.upper() for a in cfg.trusted_associations}
-    )
-    if (plan is None or plan.uses_issue_code) and not trusted:
+    if (plan is None or plan.uses_issue_code) and not _may_run(issue, cfg, opts, sandbox):
         result.status = "needs-approval"
-        what = ("The reproduction comes from the issue body" if plan else
-                "The report has no runnable code, and an AI-written test would be built from the issue text,")
-        result.notes.append(
-            f"{what} and its author is `{issue.author_association}`, so nothing was "
-            "executed. Review it, then re-run with `--trust-issue-code` or `--sandbox docker`."
-        )
+        result.notes.append(_approval_note(plan, issue))
         return result
 
     result.bad_sha = bisect_mod.resolve(repo, opts.bad)
