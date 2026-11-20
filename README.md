@@ -9,7 +9,7 @@ A background triage agent for GitHub maintainers. For each newly opened issue it
 
 Nothing is posted to GitHub unless you pass `--publish`.
 
-No LLM, no API keys, no dependencies beyond Python 3.11+, `git` and the [GitHub CLI](https://cli.github.com). Everything is deterministic and runs on your machine or your CI runner.
+No AI model, no API keys and no dependencies beyond Python 3.11+, `git` and the [GitHub CLI](https://cli.github.com), unless you [turn AI on](#optional-ai-help). By default everything is deterministic and runs on your machine or your CI runner.
 
 ## Install
 
@@ -48,6 +48,7 @@ test = "pytest -x {test_file}"   # how to run the generated test
 sandbox = "docker"
 docker_image = "ghcr.io/you/project-ci:latest"   # an image that already has your dependencies
 timeout = 180
+ai = "off"                       # "anthropic" or "command" to turn AI help on
 ```
 
 ## How a commit is judged
@@ -61,6 +62,25 @@ The same check is used to confirm the bug, find a good baseline, drive `git bise
 The reporter's snippet is run exactly as written. Two things are done for it first, both from a static read of your code (nothing is imported or executed): imports the snippet forgot (`import os`, `from yourpkg import Thing`) are added and listed in the report, and `python app.py --flag` in the report keeps its arguments.
 
 Report statuses: `reproduced`, `not-reproduced`, `inconclusive` (failed differently), `needs-info` (nothing runnable in the issue), `needs-approval` (see below).
+
+## Optional AI help
+
+Off by default. About nine in ten bug reports contain no code that runs, and undoing a commit is rarely the right fix. With `--ai anthropic` (and `ANTHROPIC_API_KEY`), or `--ai-cmd "your-command"` for any other or local model, a model may propose two things:
+
+- **A test**, when the report has no runnable code or its code fails differently. It is used only if it fails with the error the reporter described.
+- **A patch**, when the revert does not fix the test. It is used only if the failing test then passes. It may not touch tests or files outside the project.
+
+Anything that does not pass its check is thrown away, and the model gets one more try with the reason. Everything it wrote is labelled "Written by an AI model" in the report, and the footer says whether AI was on and how many calls were made.
+
+What changes when you turn it on:
+
+- Parts of the issue and of your source code are sent to the model provider (or to your own command).
+- It costs money: up to four calls per issue.
+- Results are no longer exactly repeatable.
+- A test with no reported error to match is the weak case. It counts only if some earlier version passes it; otherwise the report says it proves nothing.
+- A patch that passes one test can still be wrong. Review it like any contribution from a stranger.
+
+The model is never asked when the reporter's own code already reproduces or runs cleanly, and never for an untrusted author outside the container. The key stays in the scout's process and is not visible to the code under test. Status: the checks are tested with a stand-in model; a field test with a real model has not been run yet.
 
 ## Safety
 

@@ -56,10 +56,14 @@ jobs:
         run: oss-bounty-scout fetch --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" -o "$RUNNER_TEMP/issue.json"
 
       # No token in this step: code from the issue runs here, in a container without network.
+      # Optional AI help (off by default): add the two commented lines and an ANTHROPIC_API_KEY secret.
+      # The key stays in the scout's own process; it is never passed into the container.
       - name: Reproduce and bisect
+        # env:
+        #   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           oss-bounty-scout triage --issue-file "$RUNNER_TEMP/issue.json" \
-            --sandbox docker --out "$RUNNER_TEMP/scout" --quiet
+            --sandbox docker --out "$RUNNER_TEMP/scout" --quiet  # --ai anthropic
           cat "$RUNNER_TEMP/scout/issue-$ISSUE.md" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4

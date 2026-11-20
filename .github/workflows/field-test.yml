@@ -8,6 +8,13 @@ on:
       issues:
         description: Closed issues to scan per project
         default: "300"
+      ai:
+        description: Use AI on reports with no runnable code (needs the ANTHROPIC_API_KEY secret; costs money)
+        type: boolean
+        default: false
+      limit:
+        description: Reports to replay per project
+        default: "80"
   push:
     branches: [main]
     paths: ["fieldtest/**", ".github/workflows/field-test.yml"]
@@ -50,11 +57,15 @@ jobs:
       - name: Fetch closed issues
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python fieldtest/field_test.py fetch "${{ matrix.repo }}" "$RUNNER_TEMP/issues.json" --issues "${{ inputs.issues || '300' }}"
-      # No token below this line: issue code runs here, inside a container with no network.
+        run: python fieldtest/field_test.py fetch "${{ matrix.repo }}" "$RUNNER_TEMP/issues.json" --issues "${{ inputs.issues || '300' }}" ${{ inputs.ai && '--prose' || '' }}
+      # No GitHub token below this line: issue code runs here, inside a container with no network.
+      # The AI key, when used, stays in the scout's own process and is never passed into the container.
       - name: Replay
+        env:
+          ANTHROPIC_API_KEY: ${{ inputs.ai && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
-          python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --image scout-field --limit 80
+          python fieldtest/field_test.py run target "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/out" --image scout-field \
+            --limit "${{ inputs.limit || '80' }}" --ai "${{ inputs.ai && 'anthropic' || 'off' }}"
           cat "$RUNNER_TEMP/out/summary.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Artifact name
         if: always()

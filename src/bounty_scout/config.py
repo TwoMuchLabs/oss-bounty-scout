@@ -20,6 +20,10 @@ class Config:
     docker_network: str = "none"
     pass_env: list[str] = field(default_factory=list)
     trusted_associations: list[str] = field(default_factory=lambda: ["OWNER", "MEMBER", "COLLABORATOR"])
+    ai: str = "off"  # "off" | "anthropic" (needs ANTHROPIC_API_KEY) | "command"
+    ai_model: str | None = None
+    ai_command: str | None = None  # reads the prompt on stdin, prints the answer
+    ai_attempts: int = 2
 
 
 def load(repo_path: str | Path) -> Config:

@@ -39,9 +39,12 @@ def gh(path: str):
     return json.loads(out.stdout)
 
 
-def is_candidate(raw: dict) -> bool:
+def is_candidate(raw: dict, prose: bool = False) -> bool:
+    """Default: reports with a runnable snippet and an error. ``prose``: an error but nothing runnable (the AI's job)."""
     issue = parse_issue(raw)
     plan = build_plan(issue)
+    if prose:
+        return bool(plan is None and issue.error_signature)
     return bool(plan and plan.source == "python-snippet" and issue.error_signature)
 
 
@@ -53,7 +56,7 @@ def cmd_fetch(args) -> int:
         if not batch or len(issues) >= args.issues:
             break
     issues = issues[: args.issues]
-    candidates = [i for i in issues if is_candidate(i)]
+    candidates = [i for i in issues if is_candidate(i, args.prose)]
     for raw in candidates:
         n = raw["number"]
         timeline = gh(f"repos/{args.repo}/issues/{n}/timeline?per_page=100") or []
@@ -95,7 +98,7 @@ def cmd_run(args) -> int:
     repo, out = Path(args.repo_path).resolve(), Path(args.out)
     (out / "reports").mkdir(parents=True, exist_ok=True)
     data = json.loads(Path(args.issues).read_text())
-    cfg = Config(sandbox=args.sandbox, docker_image=args.image, timeout=args.timeout)
+    cfg = Config(sandbox=args.sandbox, docker_image=args.image, timeout=args.timeout, ai=args.ai, ai_model=args.ai_model)
     rows = []
     for raw in data["candidates"][: args.limit]:
         n, started = raw["number"], time.monotonic()
@@ -126,6 +129,8 @@ def cmd_run(args) -> int:
                 row.update(suspect=result.suspect.location, confidence=result.suspect.confidence)
             if result.fix:
                 row.update(patch=result.fix.status, patch_scope=result.fix.scope)
+            row.update(ai_calls=result.ai_calls, ai_test=result.ai_test_gate,
+                       test_source=result.plan.source if result.plan else None)
 
             # Score against what the maintainers actually did.
             fix = raw.get("_fix_commit")
@@ -173,6 +178,9 @@ def summarise(data: dict, rows: list[dict]) -> dict:
         "suspect_file_scored": count(lambda r: "suspect_in_fix" in r),
         "suspect_file_matches_fix": count(lambda r: r.get("suspect_in_fix")),
         "patch_verified": count(lambda r: r.get("patch") == "verified"),
+        "ai_test_accepted": count(lambda r: r.get("test_source") == "ai-test"),
+        "ai_patch_verified": count(lambda r: r.get("patch_scope") == "ai" and r.get("patch") == "verified"),
+        "ai_calls": sum(r.get("ai_calls") or 0 for r in rows),
     }
 
 
@@ -191,12 +199,14 @@ def main() -> int:
     p = sub.add_parser("fetch")
     p.add_argument("repo"); p.add_argument("output"); p.add_argument("--pages", type=int, default=30)
     p.add_argument("--issues", type=int, default=300, help="closed issues to scan")
+    p.add_argument("--prose", action="store_true", help="select reports with an error but no runnable code (for --ai runs)")
     p.set_defaults(func=cmd_fetch)
     p = sub.add_parser("run")
     p.add_argument("repo_path"); p.add_argument("issues"); p.add_argument("out")
     p.add_argument("--image", required=True); p.add_argument("--limit", type=int, default=40)
     p.add_argument("--timeout", type=float, default=60)
     p.add_argument("--sandbox", default="docker", choices=["docker", "worktree"])
+    p.add_argument("--ai", default="off", choices=["off", "anthropic"]); p.add_argument("--ai-model")
     p.set_defaults(func=cmd_run)
     args = parser.parse_args()
     return args.func(args)

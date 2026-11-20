@@ -39,7 +39,7 @@ class Suspect:
 @dataclass
 class Fix:
     diff: str
-    scope: str  # "file" (revert of the culprit's change to one file) | "commit" (full revert)
+    scope: str  # "file" (revert of the culprit's change to one file) | "commit" (full revert) | "ai" (model-written)
     status: str  # "verified" | "still-fails" | "does-not-apply" | "unverified"
 
 
