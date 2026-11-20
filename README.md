@@ -173,4 +173,14 @@ pip install -e .
 python -m unittest discover -s tests -t .
 ```
 
+### Checking a refactor
+
+"No behaviour change" should be a measurement. `scripts/behaviour_check.py` runs the code from a git ref and the code in the working tree over the same inputs and compares everything they produce:
+
+```sh
+python scripts/behaviour_check.py <base-ref> --issues issues.json.gz --fetch fetch.json.gz --repo <python-checkout> [--repo ...] [--only text,repositories,reports,field,triage,cli]
+```
+
+`issues.json.gz` (1,398 real issues from twelve projects) and `fetch.json.gz` are on the `recordings` branch, written by the `Record GitHub issues` workflow. The check covers the parser and the reproduction builder on every recorded issue and damaged copies of it, error matching, import completion and localisation against the checkouts you give it, the whole pipeline on small purpose-built repositories (AI gates included, with canned replies), the report for 6,000 made-up results, and the command line. A clean result is evidence, not proof: the script's header lists what it does not cover. The `Field test` workflow remains the check that the tool still finds the culprits it used to find.
+
 MIT licensed. A [Two Much Labs](https://twomuchlabs.com) project.
