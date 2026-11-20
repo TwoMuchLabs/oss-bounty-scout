@@ -88,7 +88,7 @@ class BisectTests(RepoCase):
 
     def test_finds_first_bad_commit_without_touching_the_checkout(self):
         result = bisect_mod.bisect(self.repo, "v1.1.0", "HEAD", CheckSpec(command=self.CHECK))
-        self.assertEqual(result.status, "found")
+        self.assertEqual(result.status, "found", result.detail)
         self.assertEqual(result.culprit.sha, self.info["culprit"])
         self.assertEqual(result.culprit.subject, "Simplify mean()")
         self.assertEqual(result.commits_in_range, 10)
