@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oss-bounty-scout"
+version = "0.1.0"
+description = "Background triage agent for GitHub maintainers: reproduce new issues, bisect regressions, write a report."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Two Much Labs" }]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/TwoMuchLabs/oss-bounty-scout"
+
+[project.scripts]
+oss-bounty-scout = "bounty_scout.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

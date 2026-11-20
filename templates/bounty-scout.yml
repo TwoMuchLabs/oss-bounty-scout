@@ -1,0 +1,67 @@
+# Copy to .github/workflows/bounty-scout.yml in the repository you maintain.
+#
+# Runs when a maintainer opens an issue, or when anyone with triage rights adds
+# the `scout` label to an issue. The report always lands in the job summary and
+# as an artifact. It is posted as an issue comment only if the repository
+# variable SCOUT_PUBLISH is set to "true".
+name: Bounty Scout
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bounty-scout-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    if: >-
+      (github.event.action == 'opened' &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event.action == 'labeled' && github.event.label.name == 'scout')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write # only used by the optional publish step
+    env:
+      ISSUE: ${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # bisect needs full history
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install oss-bounty-scout
+        run: pip install "git+https://github.com/TwoMuchLabs/oss-bounty-scout@main"
+
+      - name: Fetch the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: oss-bounty-scout fetch --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" -o "$RUNNER_TEMP/issue.json"
+
+      # No token in this step: code from the issue runs here, in a container without network.
+      - name: Reproduce and bisect
+        run: |
+          oss-bounty-scout triage --issue-file "$RUNNER_TEMP/issue.json" \
+            --sandbox docker --out "$RUNNER_TEMP/scout" --quiet
+          cat "$RUNNER_TEMP/scout/issue-$ISSUE.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bounty-scout-issue-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}/scout/
+
+      - name: Publish the report as a comment
+        if: vars.SCOUT_PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: oss-bounty-scout publish --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --report "$RUNNER_TEMP/scout/issue-$ISSUE.md"
