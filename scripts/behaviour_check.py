@@ -137,6 +137,7 @@ HANDMADE = [
     "```js\nimport express from 'express'\nconst app = express()\n```\n\n```javascript\nconst x = require('express')\nimport y from 'y'\n```\n\nTypeError: app.foo is not a function\n    at Object.<anonymous> (/srv/app/index.js:3:5)",
     '```console\n$ sudo apt install thing\n$ cd project\n$ pip install -e .\n```\n\nIt worked in 1.2.3 and broke in 1.3.0.\n\nerror: something failed',
     '```python\nimport sys\nprint(sys.version)\n```\n\n```python\n    import statskit\n    statskit.mean([])\n```\n\n```python\nthis is not python\n```\n\n```\nrepro.py:3: error: Argument 1 has incompatible type  [arg-type]\n```\npyright',
+    '```\nIn [1]: mean([])\n>>> spread([])\nZeroDivisionError: division by zero\n```',
     'panic: runtime error: index out of range [3] with length 3\n\ngoroutine 1 [running]:\nmain.main()\n\t/home/u/app/main.go:12 +0x1d\n\nGo version: go1.22.1\nrustc 1.77.0\nWindows Server 2022',
     "```python\nimport werkzeug\nimport flask as f\nwerkzeug.routing.Map()\nwerkzeug.nothing.here()\nflask.json.dumps({})\n```\n\n```sh\npython3 repro.py --port 8080\n```\n\nAttributeError: module 'werkzeug' has no attribute 'routing'",
 ]
@@ -251,9 +252,16 @@ def snap_text_functions(issues: list[dict], trees: list[Path], snap: dict) -> No
         snap[f"match/{n}"] = digest(row)
 
 
-def snap_repositories(issues: list[dict], repos: list[Path], snap: dict) -> None:
+def snap_repositories(issues: list[dict], repos: list[Path], layout: Path, snap: dict) -> None:
     from bounty_scout import issue_parser, localize, repro
     from bounty_scout.runner import git
+
+    for limit in (1500, 9, 4, 1, 0):
+        top, exports = repro.project_index(layout, limit)
+        snap[f"index/layout/{limit}"] = [sorted(top), sorted(exports.items())]
+    names = ["alias", "other", "thing", "single", "pkg", "Kind", "VALUE", "J", "sep", "os", "DEEP", "datetime", "Path", "nothing"]
+    index = repro.project_index(layout)
+    snap["imports/layout"] = [repro.resolve_imports(names, *index, code) for code in ("", "pkg.sub.deep.thing()\npkg.a.x\ndatetime(1, 1, 1)\nos.sep")]
 
     reported = []
     for raw in issues[:4000]:
@@ -507,7 +515,7 @@ def take_snapshot(args) -> int:
     snap: dict = {}
     parts = {
         "text": lambda: snap_text_functions(issues, [work / "repos" / "statskit"] + repos[:2], snap),
-        "repositories": lambda: snap_repositories(issues, repos + [work / "repos" / "statskit"], snap),
+        "repositories": lambda: snap_repositories(issues, repos + [work / "repos" / "statskit"], work / "repos" / "layout", snap),
         "reports": lambda: snap_reports(issues, snap),
         "field": lambda: snap_field_test(work, args.fetch, repos, snap),
         "triage": lambda: snap_triage(work, snap),
@@ -530,6 +538,9 @@ def build_repositories(dest: Path) -> None:
     core = info["repo"] / "statskit" / "core.py"
     fixture._commit(info["repo"], "Comment spread()", {"statskit/core.py": core.read_text().replace(
         "return max(values) - min(values)", "return max(values) - min(values)  # range")})
+    for name, text in LAYOUT.items():  # every case project_index() distinguishes, in one tree (not a repository)
+        (dest / "layout" / name).parent.mkdir(parents=True, exist_ok=True)
+        (dest / "layout" / name).write_text(text)
     repo = dest / "unknown"
     fixture._git(dest, "init", "-q", "-b", "main", str(repo))
     fixture._commit(repo, "one", {"pkg/__init__.py": ""})
@@ -543,6 +554,27 @@ def build_repositories(dest: Path) -> None:
     broken = good.replace("    if not values:\n        return 0.0\n", "").replace("LIMIT = 10", "LIMIT = 20")
     fixture._commit(repo, "tidy", {"pkg/core.py": broken})
     fixture._commit(repo, "raise limit", {"pkg/core.py": broken.replace("LIMIT = 20", "LIMIT = 30")})
+
+
+LAYOUT = {
+    "src/pkg/__init__.py": "from .a import thing as alias, other\nfrom .b import *\nfrom . import a\n__all__ = ['alias']\n",
+    "src/pkg/a.py": "def thing(): pass\nasync def co(): pass\nclass Kind: pass\nx: int = 1\nA = B = 2\n_private = 1\nobj.attr = 3\ny: int\nimport os\n",
+    "src/pkg/b.py": "from os.path import join as J, sep\nVALUE = 1\n",
+    "src/pkg/broken.py": "def (:\n",
+    "src/pkg/sub/__init__.py": "",
+    "src/pkg/sub/deep.py": "def thing(): pass\nDEEP = 1\n",
+    "src/pkg/tests/test_a.py": "HIDDEN_IN_TESTS = 1\n",
+    "src/docs/__init__.py": "IN_DOCS = 1\n",
+    "src/notpkg/mod.py": "NOT_A_PACKAGE = 1\n",
+    "src/_hidden.py": "HIDDEN = 1\n",
+    "single.py": "def single(): pass\nVALUE = 2\n",
+    "setup.py": "SETUP = 1\n",
+    "conftest.py": "CONF = 1\n",
+    ".dot/__init__.py": "DOT = 1\n",
+    "other/__init__.py": "from pkg import alias\nthing = 1\n",
+    "other/examples/ex.py": "EXAMPLE = 1\n",
+    "README.md": "# layout\n",
+}
 
 
 def compare(args) -> int:
