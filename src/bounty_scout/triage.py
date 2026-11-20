@@ -31,8 +31,9 @@ class Options:
     trust_issue_code: bool = False
     first_parent: bool = False
     bisect: bool = True
-    ai: str | None = None  # off | anthropic | command
+    ai: str | None = None  # off | anthropic | openai | command
     ai_model: str | None = None
+    ai_base_url: str | None = None
     ai_cmd: str | None = None
 
 
@@ -68,7 +69,8 @@ def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None,
     body = (raw_issue.get("body") or "").replace("\r\n", "\n")
     sandbox = opts.sandbox or cfg.sandbox
     result = TriageResult(issue, "needs-info", bad_ref=opts.bad, sandbox=sandbox)
-    ai = ai_mod.from_settings(opts.ai or cfg.ai, opts.ai_model or cfg.ai_model, opts.ai_cmd or cfg.ai_command, cfg.ai_attempts)
+    ai = ai_mod.from_settings(opts.ai or cfg.ai, opts.ai_model or cfg.ai_model, opts.ai_cmd or cfg.ai_command,
+                               cfg.ai_attempts, opts.ai_base_url or cfg.ai_base_url)
     result.ai_label = ai.label if ai else None
 
     test_cmd = opts.test_cmd or (cfg.test if cfg.test and "{test_file}" not in cfg.test else None)

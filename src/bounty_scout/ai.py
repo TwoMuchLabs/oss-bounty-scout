@@ -10,8 +10,13 @@ else: a proposed test is used only if it fails with the error the reporter
 described, and a proposed patch only if that test then passes. Anything else
 is thrown away. Proposals are always labelled as AI-written in the report.
 
-Two backends: the Claude API (``ANTHROPIC_API_KEY``), or any command that reads
-a prompt on stdin and prints the answer, which also allows local models.
+Providers are interchangeable; nothing else in the tool knows which one is in use:
+
+* ``anthropic`` – the Claude API (``ANTHROPIC_API_KEY``)
+* ``openai``    – the OpenAI API (``OPENAI_API_KEY``), or with a base URL any
+  server that speaks the same chat-completions protocol (Azure, OpenRouter,
+  Ollama, vLLM, LM Studio and so on)
+* ``command``   – any program that reads a prompt on stdin and prints the answer
 """
 
 from __future__ import annotations
@@ -28,8 +33,18 @@ from pathlib import Path
 from .issue_parser import ParsedIssue
 from .runner import git
 
-API_URL = "https://api.anthropic.com/v1/messages"
-DEFAULT_MODEL = "claude-sonnet-5-5"
+@dataclass(frozen=True)
+class Provider:
+    base_url: str
+    key_env: str
+    default_model: str
+    base_env: str
+
+
+PROVIDERS = {
+    "anthropic": Provider("https://api.anthropic.com", "ANTHROPIC_API_KEY", "claude-sonnet-5-5", "ANTHROPIC_BASE_URL"),
+    "openai": Provider("https://api.openai.com/v1", "OPENAI_API_KEY", "gpt-6.2-astra", "OPENAI_BASE_URL"),
+}
 MAX_CONTEXT = 14_000
 
 SYSTEM = (
@@ -99,41 +114,60 @@ class AIError(RuntimeError):
 
 @dataclass
 class AI:
-    backend: str  # "anthropic" | "command"
-    model: str = DEFAULT_MODEL
+    backend: str  # "anthropic" | "openai" | "command"
+    model: str = ""
     command: str | None = None
     attempts: int = 2
+    base_url: str | None = None
     calls: int = 0
 
     @property
     def label(self) -> str:
-        return self.model if self.backend == "anthropic" else "custom command"
+        return "custom command" if self.backend == "command" else f"{self.backend}: {self.model}"
+
+    def _key(self) -> str | None:
+        provider = PROVIDERS[self.backend]
+        key = os.environ.get(provider.key_env)
+        # A self-hosted OpenAI-compatible server usually needs no key; the hosted APIs always do.
+        if not key and not (self.backend == "openai" and self.base_url):
+            raise AIError(f"AI is on but {provider.key_env} is not set")
+        return key
 
     def ask(self, prompt: str) -> str:
-        if self.backend == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
-            raise AIError("AI is on but ANTHROPIC_API_KEY is not set")
-        self.calls += 1
         if self.backend == "command":
+            self.calls += 1
             proc = subprocess.run(self.command, shell=True, input=f"{SYSTEM}\n\n{prompt}", capture_output=True, text=True, timeout=300)
             if proc.returncode != 0:
                 raise AIError(f"AI command failed ({proc.returncode}): {proc.stderr.strip()[:300]}")
             return proc.stdout
-        key = os.environ["ANTHROPIC_API_KEY"]
-        body = json.dumps({"model": self.model, "max_tokens": 4000, "system": SYSTEM,
-                           "messages": [{"role": "user", "content": prompt}]}).encode()
-        request = urllib.request.Request(API_URL, data=body, headers={
-            "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"})
+        key = self._key()
+        self.calls += 1
+        base = (self.base_url or PROVIDERS[self.backend].base_url).rstrip("/")
+        if self.backend == "anthropic":
+            data = self._post(f"{base}/v1/messages", {"x-api-key": key, "anthropic-version": "2023-06-01"}, {
+                "model": self.model, "max_tokens": 4000, "system": SYSTEM,
+                "messages": [{"role": "user", "content": prompt}]})
+            return "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
+        data = self._post(f"{base}/chat/completions", {"authorization": f"Bearer {key}"} if key else {}, {
+            "model": self.model,
+            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]})
+        choices = data.get("choices") or [{}]
+        return (choices[0].get("message") or {}).get("content") or ""
+
+    def _post(self, url: str, headers: dict[str, str], payload: dict) -> dict:
+        request = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                         headers={"content-type": "application/json", **headers})
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
-                data = json.load(response)
+                return json.load(response)
         except urllib.error.HTTPError as exc:
-            raise AIError(f"Claude API returned {exc.code}: {exc.read().decode(errors='replace')[:300]}") from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise AIError(f"could not reach the Claude API: {exc}") from exc
-        return "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
+            raise AIError(f"{self.backend} API returned {exc.code}: {exc.read().decode(errors='replace')[:300]}") from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise AIError(f"could not get an answer from the {self.backend} API: {exc}") from exc
 
 
-def from_settings(mode: str | None, model: str | None = None, command: str | None = None, attempts: int = 2) -> AI | None:
+def from_settings(mode: str | None, model: str | None = None, command: str | None = None, attempts: int = 2,
+                  base_url: str | None = None) -> AI | None:
     mode = (mode or "off").lower()
     if mode == "off":
         return None
@@ -141,9 +175,11 @@ def from_settings(mode: str | None, model: str | None = None, command: str | Non
         if not command:
             raise ValueError("ai = \"command\" needs ai_command (or --ai-cmd)")
         return AI("command", command=command, attempts=attempts)
-    if mode == "anthropic":
-        return AI("anthropic", model=model or DEFAULT_MODEL, attempts=attempts)
-    raise ValueError(f"unknown ai setting {mode!r} (expected off, anthropic or command)")
+    if mode in PROVIDERS:
+        provider = PROVIDERS[mode]
+        return AI(mode, model=model or provider.default_model, attempts=attempts,
+                  base_url=base_url or os.environ.get(provider.base_env) or None)
+    raise ValueError(f"unknown ai setting {mode!r} (expected off, {', '.join(PROVIDERS)} or command)")
 
 
 # --- context -----------------------------------------------------------------

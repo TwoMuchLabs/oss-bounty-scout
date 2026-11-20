@@ -48,7 +48,7 @@ test = "pytest -x {test_file}"   # how to run the generated test
 sandbox = "docker"
 docker_image = "ghcr.io/you/project-ci:latest"   # an image that already has your dependencies
 timeout = 180
-ai = "off"                       # "anthropic" or "command" to turn AI help on
+ai = "off"                       # "anthropic", "openai" or "command" to turn AI help on
 ```
 
 ## How a commit is judged
@@ -65,22 +65,35 @@ Report statuses: `reproduced`, `not-reproduced`, `inconclusive` (failed differen
 
 ## Optional AI help
 
-Off by default. About nine in ten bug reports contain no code that runs, and undoing a commit is rarely the right fix. With `--ai anthropic` (and `ANTHROPIC_API_KEY`), or `--ai-cmd "your-command"` for any other or local model, a model may propose two things:
+Off by default. About nine in ten bug reports contain no code that runs, and undoing a commit is rarely the right fix. Turn AI on and a model may propose two things:
 
 - **A test**, when the report has no runnable code or its code fails differently. It is used only if it fails with the error the reporter described.
 - **A patch**, when the revert does not fix the test. It is used only if the failing test then passes. It may not touch tests or files outside the project.
 
-Anything that does not pass its check is thrown away, and the model gets one more try with the reason. Everything it wrote is labelled "Written by an AI model" in the report, and the footer says whether AI was on and how many calls were made.
+Anything that does not pass its check is thrown away, and the model gets one more try with the reason. Everything it wrote is labelled "Written by an AI model" in the report, and the footer names the provider and model and how many calls were made.
+
+Use whichever provider you like. The rest of the tool does not know or care which one it is:
+
+| Provider | Turn it on | Key |
+|---|---|---|
+| Anthropic | `--ai anthropic` | `ANTHROPIC_API_KEY` |
+| OpenAI | `--ai openai` | `OPENAI_API_KEY` |
+| Anything that speaks OpenAI's chat protocol (Azure, OpenRouter, Ollama, vLLM, LM Studio…) | `--ai openai --ai-base-url http://localhost:11434/v1 --ai-model <name>` | `OPENAI_API_KEY` if the server wants one |
+| Anything else | `--ai-cmd "your-command"` (prompt on stdin, answer on stdout) | yours |
+
+`--ai-model` picks the model; each provider has a default (`claude-sonnet-5-5`, `gpt-6.2-astra`). The same settings work in `.bounty-scout.toml` as `ai`, `ai_model`, `ai_base_url` and `ai_command`.
 
 What changes when you turn it on:
 
-- Parts of the issue and of your source code are sent to the model provider (or to your own command).
-- It costs money: up to four calls per issue.
+- Parts of the issue and of your source code are sent to the provider you chose. With a local server or your own command, they stay with you.
+- It costs money on a hosted provider: up to four calls per issue.
 - Results are no longer exactly repeatable.
 - A test with no reported error to match is the weak case. It counts only if some earlier version passes it; otherwise the report says it proves nothing.
 - A patch that passes one test can still be wrong. Review it like any contribution from a stranger.
 
-The model is never asked when the reporter's own code already reproduces or runs cleanly, and never for an untrusted author outside the container. The key stays in the scout's process and is not visible to the code under test. Status: the checks are tested with a stand-in model; a field test with a real model has not been run yet.
+The model is never asked when the reporter's own code already reproduces or runs cleanly, and never for an untrusted author outside the container. Keys stay in the scout's process and are not visible to the code under test.
+
+Status: the checks, and each provider's request and response format, are tested against stand-ins. No real model from any provider has been run through it yet.
 
 ## Safety
 

@@ -4,10 +4,16 @@ What is tested is the gate, not the model: a proposal is used only when the
 deterministic check accepts it.
 """
 
+import json
+import os
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+from bounty_scout import ai as ai_mod
 
 from bounty_scout.config import Config
 from bounty_scout.report import render
@@ -130,6 +136,110 @@ class AITests(unittest.TestCase):
             result = triage(self.repo, fixture.issue(body=SPREAD_BODY),
                             self.model(*[SPREAD_FIX.replace("statskit/core.py", target)] * 2))
             self.assertIsNone(result.fix, target)
+
+
+class _FakeAPI(BaseHTTPRequestHandler):
+    """Answers like the Claude and OpenAI APIs, and records what it was sent."""
+
+    seen: list = []
+    reply = GOOD_TEST
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        type(self).seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}, body))
+        if self.path == "/v1/messages":
+            answer = {"content": [{"type": "text", "text": self.reply}]}
+        elif self.path == "/chat/completions":
+            answer = {"choices": [{"message": {"role": "assistant", "content": self.reply}}]}
+        else:
+            self.send_error(404)
+            return
+        data = json.dumps(answer).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+class ProviderTests(unittest.TestCase):
+    """The same triage through each provider's wire format, against a local stand-in server."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="scout-prov-")
+        cls.info = fixture.build(Path(cls._tmp.name) / "statskit")
+        cls.server = HTTPServer(("127.0.0.1", 0), _FakeAPI)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        _FakeAPI.seen.clear()
+        self._env = dict(os.environ)
+        for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"):
+            os.environ.pop(name, None)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def run_with(self, **cfg):
+        return triage(self.info["repo"], fixture.issue(body=PROSE), Config(**cfg), Options(bisect=False))
+
+    def test_anthropic(self):
+        os.environ["ANTHROPIC_API_KEY"] = "key-a"
+        result = self.run_with(ai="anthropic", ai_base_url=self.url)
+        self.assertEqual((result.status, result.plan.source), ("reproduced", "ai-test"))
+        path, headers, body = _FakeAPI.seen[0]
+        self.assertEqual((path, headers["x-api-key"], body["model"]), ("/v1/messages", "key-a", "claude-sonnet-5-5"))
+        self.assertIn("anthropic: claude-sonnet-5-5", render(result))
+
+    def test_openai(self):
+        os.environ["OPENAI_API_KEY"] = "key-o"
+        result = self.run_with(ai="openai", ai_base_url=self.url, ai_model="some-model")
+        self.assertEqual((result.status, result.plan.source), ("reproduced", "ai-test"))
+        path, headers, body = _FakeAPI.seen[0]
+        self.assertEqual((path, headers["authorization"], body["model"]), ("/chat/completions", "Bearer key-o", "some-model"))
+        self.assertEqual([m["role"] for m in body["messages"]], ["system", "user"])
+        self.assertIn("openai: some-model", render(result))
+
+    def test_openai_compatible_server_needs_no_key_and_base_url_can_come_from_the_environment(self):
+        os.environ["OPENAI_BASE_URL"] = self.url
+        result = self.run_with(ai="openai", ai_model="local-model")
+        self.assertEqual(result.status, "reproduced")
+        self.assertNotIn("authorization", _FakeAPI.seen[0][1])
+
+    def test_missing_key_is_reported_and_no_call_is_made(self):
+        for provider, variable in (("anthropic", "ANTHROPIC_API_KEY"), ("openai", "OPENAI_API_KEY")):
+            result = self.run_with(ai=provider)
+            self.assertEqual((result.status, result.ai_calls), ("needs-info", 0))
+            self.assertIn(f"{variable} is not set", " ".join(result.notes))
+        self.assertEqual(_FakeAPI.seen, [])
+
+    def test_api_error_does_not_break_the_triage(self):
+        os.environ["OPENAI_API_KEY"] = "key-o"
+        result = self.run_with(ai="openai", ai_base_url=self.url + "/nowhere")
+        self.assertEqual(result.status, "needs-info")
+        self.assertIn("openai API returned 404", " ".join(result.notes))
+
+    def test_keys_never_reach_the_code_under_test(self):
+        os.environ["ANTHROPIC_API_KEY"] = "key-a"
+        os.environ["OPENAI_API_KEY"] = "key-o"
+        body = "```python\nimport os\nprint(sorted(k for k in os.environ if 'KEY' in k))\nraise KeyError('x')\n```\n\nKeyError: 'x'"
+        result = triage(self.info["repo"], fixture.issue(body=body), Config(ai="openai", ai_base_url=self.url), Options(bisect=False))
+        self.assertIn("[]", result.head.result.output)
+
+    def test_unknown_provider(self):
+        with self.assertRaises(ValueError):
+            ai_mod.from_settings("gemini")
 
 
 if __name__ == "__main__":

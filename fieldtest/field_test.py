@@ -98,7 +98,7 @@ def cmd_run(args) -> int:
     repo, out = Path(args.repo_path).resolve(), Path(args.out)
     (out / "reports").mkdir(parents=True, exist_ok=True)
     data = json.loads(Path(args.issues).read_text())
-    cfg = Config(sandbox=args.sandbox, docker_image=args.image, timeout=args.timeout, ai=args.ai, ai_model=args.ai_model)
+    cfg = Config(sandbox=args.sandbox, docker_image=args.image, timeout=args.timeout, ai=args.ai, ai_model=args.ai_model or None)
     rows = []
     for raw in data["candidates"][: args.limit]:
         n, started = raw["number"], time.monotonic()
@@ -206,7 +206,7 @@ def main() -> int:
     p.add_argument("--image", required=True); p.add_argument("--limit", type=int, default=40)
     p.add_argument("--timeout", type=float, default=60)
     p.add_argument("--sandbox", default="docker", choices=["docker", "worktree"])
-    p.add_argument("--ai", default="off", choices=["off", "anthropic"]); p.add_argument("--ai-model")
+    p.add_argument("--ai", default="off", choices=["off", "anthropic", "openai"]); p.add_argument("--ai-model")
     p.set_defaults(func=cmd_run)
     args = parser.parse_args()
     return args.func(args)

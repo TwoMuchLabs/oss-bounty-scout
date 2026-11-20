@@ -20,8 +20,9 @@ class Config:
     docker_network: str = "none"
     pass_env: list[str] = field(default_factory=list)
     trusted_associations: list[str] = field(default_factory=lambda: ["OWNER", "MEMBER", "COLLABORATOR"])
-    ai: str = "off"  # "off" | "anthropic" (needs ANTHROPIC_API_KEY) | "command"
-    ai_model: str | None = None
+    ai: str = "off"  # "off" | "anthropic" (ANTHROPIC_API_KEY) | "openai" (OPENAI_API_KEY) | "command"
+    ai_model: str | None = None  # default: the provider's current general-purpose model
+    ai_base_url: str | None = None  # for "openai": any server that speaks the same protocol
     ai_command: str | None = None  # reads the prompt on stdin, prints the answer
     ai_attempts: int = 2
 

@@ -71,7 +71,7 @@ def cmd_triage(args) -> int:
         good=args.good, bad=args.bad, test_cmd=args.test_cmd, setup_cmd=args.setup_cmd, match=args.match,
         timeout=args.timeout, sandbox=args.sandbox, trust_issue_code=args.trust_issue_code,
         first_parent=args.first_parent, bisect=not args.no_bisect,
-        ai="command" if args.ai_cmd and not args.ai else args.ai, ai_model=args.ai_model, ai_cmd=args.ai_cmd,
+        ai="command" if args.ai_cmd and not args.ai else args.ai, ai_model=args.ai_model, ai_cmd=args.ai_cmd, ai_base_url=args.ai_base_url,
     )
     issues = _collect_issues(args)
     if not issues:
@@ -152,9 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--trust-issue-code", action="store_true", help="execute code from the issue even when its author is not a maintainer")
     p.add_argument("--first-parent", action="store_true", help="bisect along first-parent history only")
     p.add_argument("--no-bisect", action="store_true", help="stop after the reproduction attempt")
-    p.add_argument("--ai", choices=["off", "anthropic", "command"],
+    p.add_argument("--ai", choices=["off", "anthropic", "openai", "command"],
                    help="let an AI model propose a test or a patch; each is used only if the deterministic check accepts it [off]")
-    p.add_argument("--ai-model", help="model for --ai anthropic (needs ANTHROPIC_API_KEY)")
+    p.add_argument("--ai-model", help="model name (default: the provider's current general-purpose model)")
+    p.add_argument("--ai-base-url", help="with --ai openai: any server that speaks the same protocol (Azure, OpenRouter, Ollama, ...)")
     p.add_argument("--ai-cmd", help="command for --ai command: reads the prompt on stdin, prints the answer")
     p.add_argument("--out", default="scout-reports", help="directory for reports [scout-reports]")
     p.add_argument("--quiet", action="store_true", help="do not print the report to stdout")
