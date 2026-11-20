@@ -119,6 +119,10 @@ SCENARIOS = [
     ("ai-patch-rejected", "statskit", {"body": SPREAD_BODY}, {}, {},
      [SPREAD_FIX.replace("return max(values) - min(values)\n=======", "return something_else\n======="),
       SPREAD_FIX.replace("    if not values:\n        return 0.0\n", "    pass\n")]),
+    ("template-and-command", "statskit", {"body": "mean of nothing fails"}, {"test": "python3 -B {test_file}"},
+     {"test_cmd": "python3 -c 'import statskit; statskit.mean([])'", "bisect": False}, None),
+    ("command-fails-outside-project", "statskit", {"body": "it exits 1"}, {}, {"test_cmd": "python3 -c 'raise SystemExit(1)'", "bisect": False}, None),
+    ("ai-not-asked-for-shell-steps", "statskit", {"body": "```sh\n$ python3 -c 'import statskit; statskit.nope()'\n```\n\nZeroDivisionError: division by zero"}, {}, {}, [GOOD_TEST]),
     ("ai-after-snippet-fails-differently", "statskit", {"body": "```python\nimport statskit\nstatskit.nope()\n```\n\nZeroDivisionError: division by zero"}, {}, {}, [GOOD_TEST]),
 ]
 
