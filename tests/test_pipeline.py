@@ -8,7 +8,10 @@ from pathlib import Path
 from bounty_scout import bisect as bisect_mod
 from bounty_scout.cli import main
 from bounty_scout.config import Config
-from bounty_scout.repro import BAD, GOOD, SKIP, CheckSpec, classify, evaluate, signature_pattern
+from bounty_scout.issue_parser import parse_issue
+from bounty_scout.repro import (
+    BAD, GOOD, SKIP, CheckSpec, build_plan, classify, error_matches, evaluate, missing_names, signature_pattern,
+)
 from bounty_scout.report import render
 from bounty_scout.runner import RunResult, Worktree, docker_argv, git, run_isolated
 from bounty_scout.triage import Options, triage
@@ -122,6 +125,66 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify(RunResult(0, "", True, 0), None)[0], SKIP)
 
 
+class MatchingTests(unittest.TestCase):
+    """Cases taken from the field test, where the same bug words its error differently on our side."""
+
+    def test_same_error_reworded_by_a_newer_python(self):
+        self.assertTrue(error_matches("TypeError: __init__() got an unexpected keyword argument 'help'", None,
+                                      "TypeError: Parameter.__init__() got an unexpected keyword argument 'help'"))
+        self.assertTrue(error_matches("TypeError: getattr(): attribute name must be string", None,
+                                      "TypeError: attribute name must be string, not 'int'"))
+
+    def test_paths_colour_codes_and_module_prefixes_do_not_matter(self):
+        self.assertTrue(error_matches(
+            "ImportError: cannot import name 'Markup' from 'jinja2' (/home/u/.venv/lib/python3.9/site-packages/jinja2/__init__.py)",
+            None, "ImportError: cannot import name 'Markup' from 'jinja2' (/work/src/jinja2/__init__.py)"))
+        self.assertTrue(error_matches("RuntimeError: Foo", None, "RuntimeError: \x1b[31mFoo\x1b[0m"))
+        self.assertTrue(error_matches("ParseException: Expected stringEnd", None,
+                                      "pyparsing.exceptions.ParseException: Expected stringEnd, found '('"))
+
+    def test_a_different_error_is_not_a_match(self):
+        self.assertFalse(error_matches("KeyError: 'a'", None, "NameError: name 'click' is not defined"))
+        self.assertFalse(error_matches("TypeError: 'int' object is not iterable", None,
+                                       "TypeError: unsupported operand type(s) for +: 'int' and 'str'"))
+        self.assertTrue(error_matches("AssertionError", None, "Traceback...\nAssertionError"))
+
+
+class PlanTests(RepoCase):
+    def plan_for(self, body):
+        return build_plan(parse_issue(fixture.issue(body=body)))
+
+    def test_snippet_is_run_exactly_as_written(self):
+        plan = self.plan_for("```python\nclass A:\n    x: 'B'\n```\n\nNameError: name 'B' is not defined")
+        self.assertIn("\nclass A:\n    x: 'B'\n", plan.test_content)
+        self.assertNotIn("def test_issue", plan.test_content)
+
+    def test_indented_snippet_is_dedented_and_invalid_blocks_are_skipped(self):
+        plan = self.plan_for("```python\n$ python t.py\noutput here\n```\n```python\n    import statskit\n    statskit.mean([])\n```\nZeroDivisionError: division by zero")
+        self.assertTrue(plan.snippet.startswith("import statskit"))
+
+    def test_arguments_from_the_report_are_kept(self):
+        plan = self.plan_for("```python\nimport sys\nprint(sys.argv)\n```\n```console\n$ python app.py --nme x\nError: No such option: --nme\n```")
+        self.assertEqual(plan.command, "python3 {test_file} --nme x")
+
+    def test_missing_names(self):
+        self.assertEqual(missing_names("x = mean([1])\nprint(os.getcwd(), x)\nfor i in y: pass"), ["mean", "os", "y"])
+        self.assertEqual(missing_names("from m import *\nfoo()"), [])
+
+    def test_forgotten_imports_are_added_from_the_project_and_stdlib(self):
+        body = "```python\nprint(os.sep)\nprint(mean([]))\nprint(statskit.spread([1]))\n```\n\nZeroDivisionError: division by zero"
+        result = triage(self.repo, fixture.issue(body=body), options=Options(bisect=False))
+        self.assertEqual(result.status, "reproduced", result.head.result.output)
+        for line in ("import os  #", "from statskit import mean  #", "import statskit  #"):
+            self.assertIn(line, result.plan.test_content)
+        self.assertIn("Added imports the snippet left out", " ".join(result.notes))
+
+    def test_missing_module_is_explained(self):
+        body = "```python\nimport not_installed_anywhere\n```\n\nKeyError: 'x'"
+        result = triage(self.repo, fixture.issue(body=body))
+        self.assertEqual(result.status, "inconclusive")
+        self.assertIn("needs the module `not_installed_anywhere`", " ".join(result.notes))
+
+
 class BisectOutputTests(unittest.TestCase):
     def test_first_bad_line_from_old_and_new_git(self):
         sha = "96b27637b5e6c46ea13e261418e2192005d7f7fb"
@@ -174,7 +237,7 @@ class TriageTests(RepoCase):
 
         report = render(result)
         for expected in ("**Reproduced**", self.info["culprit"][:10], "`statskit/core.py:7`", "```diff",
-                         "def test_issue_42():", "Ubuntu 22.04", "reported working in `1.1.0`", "Verified:"):
+                         "from statskit import mean\n\nprint(mean([]))", "Ubuntu 22.04", "reported working in `1.1.0`", "Verified:"):
             self.assertIn(expected, report)
         self.assertEqual(self.worktrees(), 1)
         self.assertEqual(git(self.repo, "status", "--porcelain").stdout, "")

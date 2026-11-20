@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,7 +11,9 @@ from . import bisect as bisect_mod
 from .config import Config
 from .issue_parser import ParsedIssue, extract_frames, parse_issue
 from .localize import Fix, Suspect, locate, resolve_frames, suggest_fix
-from .repro import BAD, GOOD, CheckSpec, ReproPlan, Verdict, build_plan, evaluate, materialise, signature_pattern
+from .repro import (
+    BAD, GOOD, CheckSpec, ReproPlan, Verdict, build_plan, complete_imports, evaluate, materialise, signature_pattern,
+)
 from .runner import Worktree
 
 
@@ -79,10 +82,14 @@ def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None,
     with tempfile.TemporaryDirectory(prefix="scout-repro-") as tmp:
         repro_dir = Path(tmp)
         repro_dir.chmod(0o755)  # readable by the unprivileged container user
+        with Worktree(repo, result.bad_sha) as wt:  # read-only look at the project to fill in forgotten imports
+            before = len(plan.notes)
+            complete_imports(plan, wt.path)
+            result.notes += plan.notes[before:]
         result.command = materialise(plan, repro_dir, sandbox)
         spec = CheckSpec(
             command=result.command, setup=opts.setup_cmd or cfg.setup,
-            signature_pattern=signature_pattern(plan.signature),
+            signature_pattern=signature_pattern(plan.signature), signature=plan.signature,
             timeout=opts.timeout or cfg.timeout, sandbox=sandbox, repro_dir=str(repro_dir),
             docker_image=cfg.docker_image, docker_network=cfg.docker_network, pass_env=cfg.pass_env,
         )
@@ -98,6 +105,12 @@ def triage(repo_path: str | Path, raw_issue: dict, config: Config | None = None,
         if head.status != BAD:
             result.status = "inconclusive"
             result.notes.append(f"The reproduction did not behave as reported at `{opts.bad}`: {head.reason}.")
+            module = re.search(r"ModuleNotFoundError: No module named '([\w.]+)'", head.result.output)
+            if module:
+                result.notes.append(
+                    f"It needs the module `{module.group(1)}`, which is not available where the test ran. "
+                    "Install it with `--setup-cmd`, or use a `docker_image` that includes it."
+                )
             return result
         result.status = "reproduced"
         if not opts.bisect:

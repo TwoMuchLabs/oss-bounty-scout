@@ -68,7 +68,7 @@ def _is_ancestor(repo: str | Path, older: str, newer: str) -> bool:
     return git(repo, "merge-base", "--is-ancestor", older, newer, check=False).returncode == 0
 
 
-def candidate_good_refs(repo: str | Path, bad: str, hints: list[str], max_tags: int = 8) -> list[str]:
+def candidate_good_refs(repo: str | Path, bad: str, hints: list[str], max_tags: int = 9) -> list[str]:
     """Where to look for a known-good commit: reporter hints, recent tags, then the root."""
     bad_sha = resolve(repo, bad)
     candidates: list[str] = []
@@ -82,7 +82,13 @@ def candidate_good_refs(repo: str | Path, bad: str, hints: list[str], max_tags: 
                 candidates.append(ref)
                 break
     tags = git(repo, "tag", "--merged", bad_sha, "--sort=-creatordate").stdout.split()
-    candidates += [t for t in tags if resolve(repo, t) != bad_sha][:max_tags]
+    tags = [t for t in tags if resolve(repo, t) != bad_sha]
+    # Newest first, then at widening intervals: recent regressions are found fast, old ones are still reachable.
+    picks, step = [0, 1], 2
+    while step < len(tags) and len(picks) < max_tags:
+        picks.append(step)
+        step *= 2
+    candidates += [tags[i] for i in picks if i < len(tags)]
     candidates += git(repo, "rev-list", "--max-parents=0", bad_sha).stdout.split()
     seen: set[str] = set()
     unique = []
