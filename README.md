@@ -3,7 +3,7 @@
 A background triage agent for GitHub maintainers. For each newly opened issue it:
 
 1. **Parses** the issue: reproduction steps, runnable code, error logs, stack frames, environment, version hints.
-2. **Reproduces** it in a temporary git worktree (or a network-less container) with a generated failing test.
+2. **Reproduces** it in a temporary git worktree (or a network-less container), running the reporter's code as a failing test.
 3. **Bisects** with `git bisect` to the commit that introduced the regression.
 4. **Reports** in Markdown: reproduction status, culprit commit, suspected file and line, and a candidate fix diff that has been re-tested against the reproduction.
 
@@ -14,7 +14,7 @@ No LLM, no API keys, no dependencies beyond Python 3.11+, `git` and the [GitHub 
 ## Install
 
 ```sh
-pip install git+https://github.com/TwoMuchLabs/oss-bounty-scout
+pip install git+https://github.com/TwoMuchLabs/oss-bounty-scout@v0.1.0
 ```
 
 ## Use
@@ -54,9 +54,11 @@ timeout = 180
 
 The same check is used to confirm the bug, find a good baseline, drive `git bisect run`, and verify the fix:
 
-- **bad**: the reported error appears in the output (or, with no known error, the command exits non-zero)
+- **bad**: the reported error appears in the output: the same exception type with the same or a similar message, since wording, paths and line numbers differ between machines and Python versions (or, with no known error, the command exits non-zero)
 - **good**: the command exits 0 without it
 - **skip**: setup failed, the run timed out, or it failed with a *different* error
+
+The reporter's snippet is run exactly as written. Two things are done for it first, both from a static read of your code (nothing is imported or executed): imports the snippet forgot (`import os`, `from yourpkg import Thing`) are added and listed in the report, and `python app.py --flag` in the report keeps its arguments.
 
 Report statuses: `reproduced`, `not-reproduced`, `inconclusive` (failed differently), `needs-info` (nothing runnable in the issue), `needs-approval` (see below).
 
@@ -70,14 +72,38 @@ Issues contain code written by strangers. By default, code from an issue is exec
 
 ## GitHub Action
 
-Copy [`templates/bounty-scout.yml`](templates/bounty-scout.yml) to `.github/workflows/` in your repository. It runs when a maintainer opens an issue or when the `scout` label is added, keeps the token out of the step that executes issue code, and writes the report to the job summary and an artifact. Set the repository variable `SCOUT_PUBLISH=true` to have it comment on the issue.
+Copy [`templates/bounty-scout.yml`](templates/bounty-scout.yml) to `.github/workflows/` in your repository. It runs when a maintainer opens an issue, when the `scout` label is added, or by hand for any issue number, keeps the token out of the step that executes issue code, and writes the report to the job summary and an artifact. Set the repository variable `SCOUT_PUBLISH=true` to have it comment on the issue.
+
+## How well does it work?
+
+We replayed closed issues from eight public Python projects (click, jinja, werkzeug, attrs, marshmallow, rich, tomlkit, packaging) as if each had just been opened: the scout ran at the commit that was current that day, in the Docker sandbox, on GitHub's runners. Then we scored it against what the maintainers actually did. Run of 20 November 2026:
+
+| | |
+|---|---|
+| Closed issues scanned | 2,317 |
+| Had a Python snippet and an error to match | 213 |
+| **Reproduced** | **79** |
+| Ran cleanly (bug not on the main branch that day, or not triggered) | 51 |
+| Failed for another reason | 83, of which 41 needed a third-party package the sandbox did not have |
+| Reproductions we could check against the maintainers' fix | 66, of which **46 pass once the fix is in** |
+| **Culprit commit found** | **21** (median: 7 test runs to search 117 commits) |
+| No earlier version where it worked | 52 (not a regression, or older versions no longer run) |
+| Search stopped or narrowed to a few commits | 6 |
+| Suspect file is a file the maintainers' fix changed | **12 of 16** that could be scored |
+| Suggested patch applied and made the test pass | 5 of 21 |
+
+Read it this way: about one closed issue in ten carries something runnable, a bit over a third of those reproduce unattended, and about a quarter of the reproduced ones get a culprit commit. Two of the 21 culprits are named by maintainers in the issue thread; the others have not been independently confirmed, though titles such as "remove deprecated Markup and escape aliases" for "cannot import name 'escape'" speak for themselves. The patch is the weak part: a revert usually no longer applies once the file has moved on.
+
+The first replay did worse (59 reproduced, 13 culprits) and showed why. Those fixes are in this version. Reproduce the numbers with the `Field test` workflow, or `fieldtest/field_test.py`.
 
 ## Limits
 
 - Reproduction needs a runnable Python or Node snippet, shell commands, or your `--test-cmd`. Bugs that show up as wrong output rather than an error need `--test-cmd`.
-- The failing test is the reporter's snippet wrapped as a test; it is not minimised further.
-- The suggested fix is a revert of the culprit's change (to the suspect file, else the whole commit). It restores old behaviour and is a starting point for a real fix.
-- POSIX only. Docker mode has unit tests for the command it builds but has not yet been exercised against a live daemon.
+- The sandbox image needs your project's dependencies, and anything else the snippet imports.
+- The failing test is the reporter's snippet; it is not minimised.
+- The suggested fix is a revert of the culprit's change (to the suspect file, else the whole commit), merged onto the failing commit when it can be. It restores old behaviour and is a starting point for a real fix.
+- Bisecting stops when more than 20 commits in the range cannot be tested. Pass a nearer `--good`.
+- Field-tested on Python projects only. Node snippets and shell steps have unit tests but no field test. POSIX only.
 
 ## Development
 
