@@ -44,71 +44,91 @@ def _tail(text: str, lines: int = 40) -> str:
     return "\n".join(rows[-lines:]) if len(rows) > lines else "\n".join(rows)
 
 
-def render(r: TriageResult) -> str:
-    issue, bad = r.issue, (r.bad_sha[:10] or r.bad_ref)
-    out = [MARKER, f"## Triage report: #{issue.number} {_safe(issue.title)}", ""]
+def _origin_rows(r: TriageResult, bad: str) -> list[tuple[str, str]]:
+    """Where the bug came from, as far as the history search could tell."""
+    b = r.bisect
+    if b and b.status == "found":
+        c = b.culprit
+        return [("Introduced by", f"`{c.short}` {_safe(c.subject)} ({_safe(c.author)}, {c.date})"),
+                ("Bisect range", f"`{b.good}` (good) → `{bad}` (bad): {b.commits_in_range} commits, {len(b.steps)} tested")]
+    if b and b.status == "ambiguous":
+        return [("Introduced by", "One of: " + ", ".join(f"`{c.short}`" for c in b.candidates))]
+    if r.regression == "no":
+        return [("Regression", f"Probably not: already fails at `{r.oldest_failing}`, the oldest version that could be tested")]
+    if r.status == "reproduced":
+        return [("Introduced by", "Not determined")]
+    return []
 
+
+def _summary_table(r: TriageResult, bad: str) -> list[str]:
     rows = [("Reproduction", _reproduction_cell(r, bad))]
     level = confidence(r)
     if level:
         rows.append(("Confidence", f"**{level[0].capitalize()}**: {level[1]}"))
-    b = r.bisect
-    if b and b.status == "found":
-        c = b.culprit
-        rows.append(("Introduced by", f"`{c.short}` {_safe(c.subject)} ({_safe(c.author)}, {c.date})"))
-        rows.append(("Bisect range", f"`{b.good}` (good) → `{bad}` (bad): {b.commits_in_range} commits, {len(b.steps)} tested"))
-    elif b and b.status == "ambiguous":
-        rows.append(("Introduced by", "One of: " + ", ".join(f"`{c.short}`" for c in b.candidates)))
-    elif r.regression == "no":
-        rows.append(("Regression", f"Probably not: already fails at `{r.oldest_failing}`, the oldest version that could be tested"))
-    elif r.status == "reproduced":
-        rows.append(("Introduced by", "Not determined"))
+    rows += _origin_rows(r, bad)
     if r.suspect:
         rows.append(("Suspected root cause", f"`{r.suspect.location}` ({r.suspect.confidence} confidence: {r.suspect.reason})"))
-    if issue.error_signature:
-        rows.append(("Reported error", f"`{_safe(issue.error_signature)[:200]}`"))
-    out += ["| | |", "|---|---|"] + [f"| **{k}** | {v} |" for k, v in rows] + [""]
+    if r.issue.error_signature:
+        rows.append(("Reported error", f"`{_safe(r.issue.error_signature)[:200]}`"))
+    return ["| | |", "|---|---|"] + [f"| **{k}** | {v} |" for k, v in rows] + [""]
 
-    if r.notes or (b and b.detail):
-        out += ["### Notes", ""] + [f"- {n}" for n in r.notes]
-        if b and b.detail:
-            out.append(f"- {b.detail}" if b.status in ("ambiguous", "abandoned") else f"- Bisect did not finish: {_safe(b.detail)[:500]}")
-        out.append("")
 
-    if r.fix and r.fix.scope == "ai":
-        out += [
+def _notes_section(r: TriageResult) -> list[str]:
+    b = r.bisect
+    stopped = b.detail if b else ""
+    if not (r.notes or stopped):
+        return []
+    out = ["### Notes", ""] + [f"- {n}" for n in r.notes]
+    if stopped:
+        out.append(f"- {stopped}" if b.status in ("ambiguous", "abandoned") else f"- Bisect did not finish: {_safe(stopped)[:500]}")
+    return out + [""]
+
+
+def _fix_section(r: TriageResult, bad: str) -> list[str]:
+    if not r.fix:
+        return []
+    if r.fix.scope == "ai":
+        return [
             "### Suggested fix", "",
             f"**Written by an AI model** (`{r.ai_label}`). It was kept because the failing test passes with it applied to `{bad}`. "
             "Passing one test does not make a patch correct: nobody has reviewed it.",
             "", _fence(r.fix.diff, "diff"), "",
         ]
-    elif r.fix:
-        scope = {"hunk": f"undoes one part of the culprit's change to `{r.suspect.file}`" if r.suspect else "",
-                 "file": f"reverts the culprit's change to `{r.suspect.file}`" if r.suspect else ""}.get(r.fix.scope) or "reverts the culprit commit"
-        out += [
-            "### Suggested fix", "",
-            f"Candidate patch ({scope}). It restores the previous behaviour; it is a starting point, not a reviewed fix.",
-            "", _FIX_STATUS[r.fix.status].format(bad=bad), "", _fence(r.fix.diff, "diff"), "",
-        ]
+    scope = {"hunk": f"undoes one part of the culprit's change to `{r.suspect.file}`" if r.suspect else "",
+             "file": f"reverts the culprit's change to `{r.suspect.file}`" if r.suspect else ""}.get(r.fix.scope) or "reverts the culprit commit"
+    return [
+        "### Suggested fix", "",
+        f"Candidate patch ({scope}). It restores the previous behaviour; it is a starting point, not a reviewed fix.",
+        "", _FIX_STATUS[r.fix.status].format(bad=bad), "", _fence(r.fix.diff, "diff"), "",
+    ]
 
-    if r.plan and r.plan.test_content:
-        ext = (r.plan.test_filename or "").rsplit(".", 1)[-1]
-        shown = r.plan.command.replace("{test_file}", r.plan.test_filename)
-        origin = []
-        if r.plan.source == "ai-test":
-            why = ("It was kept because it fails with the error the reporter described." if r.ai_test_gate == "reported-error"
-                   else "The report gave no error to check it against; it fails on an assertion the model wrote. Read it before relying on it.")
-            origin = [f"**Written by an AI model** (`{r.ai_label}`) from the report's description, because nothing in the report reproduced the bug as written. {why}", ""]
-        out += ["### Failing test", ""] + origin + [f"`{r.plan.test_filename}`, run as `{shown}`:", "",
-                _fence(r.plan.test_content, _EXT_LANG.get(ext, "")), ""]
-    elif r.plan:
-        out += ["### Failing test", "", f"Command: `{r.plan.command}`", ""]
 
-    if r.head and r.head.result.output.strip():
-        out += [_details(f"Output at <code>{bad}</code> (exit {r.head.result.exit_code}, {r.head.result.duration:.1f}s)",
-                         _fence(_tail(r.head.result.output))), ""]
+def _test_section(r: TriageResult) -> list[str]:
+    plan = r.plan
+    if not plan:
+        return []
+    if not plan.test_content:
+        return ["### Failing test", "", f"Command: `{plan.command}`", ""]
+    ext = (plan.test_filename or "").rsplit(".", 1)[-1]
+    shown = plan.command.replace("{test_file}", plan.test_filename)
+    origin = []
+    if plan.source == "ai-test":
+        why = ("It was kept because it fails with the error the reporter described." if r.ai_test_gate == "reported-error"
+               else "The report gave no error to check it against; it fails on an assertion the model wrote. Read it before relying on it.")
+        origin = [f"**Written by an AI model** (`{r.ai_label}`) from the report's description, because nothing in the report reproduced the bug as written. {why}", ""]
+    return ["### Failing test", ""] + origin + [f"`{plan.test_filename}`, run as `{shown}`:", "",
+            _fence(plan.test_content, _EXT_LANG.get(ext, "")), ""]
 
-    out += ["### Extracted from the issue", ""]
+
+def _output_section(r: TriageResult, bad: str) -> list[str]:
+    if not (r.head and r.head.result.output.strip()):
+        return []
+    return [_details(f"Output at <code>{bad}</code> (exit {r.head.result.exit_code}, {r.head.result.duration:.1f}s)",
+                     _fence(_tail(r.head.result.output))), ""]
+
+
+def _extracted_section(issue) -> list[str]:
+    out = ["### Extracted from the issue", ""]
     if issue.environment:
         out += ["| Environment | |", "|---|---|"] + [f"| {_safe(k)} | {_safe(v)} |" for k, v in issue.environment.items()] + [""]
     if issue.steps:
@@ -118,15 +138,30 @@ def render(r: TriageResult) -> str:
         out += ["Version hints: " + "; ".join(hints) + ".", ""]
     if issue.missing:
         out += ["Missing from the report:", ""] + [f"- {m}" for m in issue.missing] + [""]
+    return out
 
-    if r.probes or (b and b.steps):
-        lines = [f"- baseline probe `{ref}`: {verdict} ({reason})" for ref, verdict, reason in r.probes]
-        lines += [f"- `{s['sha'][:10]}`: {s['verdict']} ({s['reason']}, {s['seconds']}s)" for s in (b.steps if b else [])]
-        out += [_details("Bisect log", "\n".join(lines)), ""]
 
+def _bisect_log(r: TriageResult) -> list[str]:
+    steps = r.bisect.steps if r.bisect else []
+    if not (r.probes or steps):
+        return []
+    lines = [f"- baseline probe `{ref}`: {verdict} ({reason})" for ref, verdict, reason in r.probes]
+    lines += [f"- `{s['sha'][:10]}`: {s['verdict']} ({s['reason']}, {s['seconds']}s)" for s in steps]
+    return [_details("Bisect log", "\n".join(lines)), ""]
+
+
+def _footer(r: TriageResult) -> str:
     isolation = "Docker container with networking disabled" if r.sandbox == "docker" else "temporary git worktree"
     ai = f"AI assistance: on ({r.ai_label}, {r.ai_calls} call{'s' if r.ai_calls != 1 else ''})" if r.ai_label else "AI assistance: off"
-    out.append(f"<sub>Generated by oss-bounty-scout {__version__} in a {isolation}. {ai}. Automated analysis: verify before acting on it.</sub>")
+    return f"<sub>Generated by oss-bounty-scout {__version__} in a {isolation}. {ai}. Automated analysis: verify before acting on it.</sub>"
+
+
+def render(r: TriageResult) -> str:
+    bad = r.bad_sha[:10] or r.bad_ref
+    out = [MARKER, f"## Triage report: #{r.issue.number} {_safe(r.issue.title)}", ""]
+    out += _summary_table(r, bad) + _notes_section(r) + _fix_section(r, bad) + _test_section(r) + _output_section(r, bad)
+    out += _extracted_section(r.issue) + _bisect_log(r)
+    out.append(_footer(r))
     return "\n".join(out) + "\n"
 
 
