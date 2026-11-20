@@ -503,6 +503,23 @@ def _names_agree(want: str, got: str) -> bool:
     return len(a & b) / len(a | b) >= 0.5  # long, dict-like messages are cut off at different points
 
 
+def _same_message(want_type: str, reported: str, got: str) -> str | None:
+    """How one error line of the reported type compares with the reported message: "similar", "type-only" or None."""
+    want_msg, got_msg = _mask(reported), _mask(got)
+    if not got_msg:
+        # pytest prints the compared values ("assert 1 == 2"); a plain run of the same assert prints nothing.
+        return "type-only" if want_type == "AssertionError" and want_msg.startswith("assert ") else None
+    if not _names_agree(reported, got):
+        return None
+    if want_msg in got_msg or got_msg in want_msg or difflib.SequenceMatcher(None, want_msg, got_msg).ratio() >= 0.6:
+        return "similar"
+    # Dict and set contents print in varying order: compare the words regardless of order.
+    want_words, got_words = set(re.findall(r"\w+", want_msg)), set(re.findall(r"\w+", got_msg))
+    if len(want_words) >= 6 and len(want_words & got_words) / len(want_words | got_words) >= 0.6:
+        return "similar"
+    return None
+
+
 def match_kind(signature: str | None, pattern: str | None, output: str, strict: bool = False) -> str | None:
     """Is the reported error in this output, and how sure is the match?
 
@@ -517,29 +534,12 @@ def match_kind(signature: str | None, pattern: str | None, output: str, strict: 
     wanted = _TYPED.match(signature or "")
     if not wanted or strict:
         return None
-    want_type, want_msg = wanted.group("type").split(".")[-1], _mask(wanted.group("msg") or "")
-    for found in _TYPED.finditer(text):
-        if found.group("type").split(".")[-1] != want_type:
-            continue
-        got_msg = _mask(found.group("msg") or "")
-        if not want_msg:
-            if not plausible_exception(wanted.group("type"), None):
-                return None
-            return "type-only"  # the report gave only the exception type
-        if got_msg and not _names_agree(wanted.group("msg") or "", found.group("msg") or ""):
-            continue
-        if not got_msg:
-            # pytest prints the compared values ("assert 1 == 2"); a plain run of the same assert prints nothing.
-            if want_type == "AssertionError" and want_msg.startswith("assert "):
-                return "type-only"
-            continue
-        if want_msg in got_msg or got_msg in want_msg or difflib.SequenceMatcher(None, want_msg, got_msg).ratio() >= 0.6:
-            return "similar"
-        # Dict and set contents print in varying order: compare the words regardless of order.
-        want_words, got_words = set(re.findall(r"\w+", want_msg)), set(re.findall(r"\w+", got_msg))
-        if len(want_words) >= 6 and len(want_words & got_words) / len(want_words | got_words) >= 0.6:
-            return "similar"
-    return None
+    want_type, reported = wanted.group("type").split(".")[-1], wanted.group("msg") or ""
+    same_type = [found for found in _TYPED.finditer(text) if found.group("type").split(".")[-1] == want_type]
+    if not _mask(reported):  # the report gave only the exception type
+        return "type-only" if same_type and plausible_exception(wanted.group("type"), None) else None
+    kinds = (_same_message(want_type, reported, found.group("msg") or "") for found in same_type)
+    return next(filter(None, kinds), None)
 
 
 def classify(result: RunResult, pattern: str | None, signature: str | None = None, strict: bool = False) -> tuple[str, str]:
