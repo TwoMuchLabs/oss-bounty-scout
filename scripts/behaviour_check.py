@@ -138,6 +138,9 @@ HANDMADE = [
     '```console\n$ sudo apt install thing\n$ cd project\n$ pip install -e .\n```\n\nIt worked in 1.2.3 and broke in 1.3.0.\n\nerror: something failed',
     '```python\nimport sys\nprint(sys.version)\n```\n\n```python\n    import statskit\n    statskit.mean([])\n```\n\n```python\nthis is not python\n```\n\n```\nrepro.py:3: error: Argument 1 has incompatible type  [arg-type]\n```\npyright',
     '```\nIn [1]: mean([])\n>>> spread([])\nZeroDivisionError: division by zero\n```',
+    '```python\ndef test_a():\n    assert mean([]) == 0\n\ndef main():\n    return 1\n\nmain()\n```\n\nZeroDivisionError: division by zero',
+    "```js\nconst x = require('express')\nimport y from 'y'\nx()\n```\n\nTypeError: x is not a function",
+    "```python\nimport werkzeug as w\nimport flask\nimport statskit\nflask.json.dumps({})\nwerkzeug.routing.Map()\nstatskit.core.mean([])\n```\n\nNameError: name 'werkzeug' is not defined",
     'panic: runtime error: index out of range [3] with length 3\n\ngoroutine 1 [running]:\nmain.main()\n\t/home/u/app/main.go:12 +0x1d\n\nGo version: go1.22.1\nrustc 1.77.0\nWindows Server 2022',
     "```python\nimport werkzeug\nimport flask as f\nwerkzeug.routing.Map()\nwerkzeug.nothing.here()\nflask.json.dumps({})\n```\n\n```sh\npython3 repro.py --port 8080\n```\n\nAttributeError: module 'werkzeug' has no attribute 'routing'",
 ]
@@ -226,6 +229,10 @@ def snap_text_functions(issues: list[dict], trees: list[Path], snap: dict) -> No
                 if tree and label == "plain" and i % 3 == 0:  # indexing a project is the slow step
                     done = safe(repro.complete_imports, plan, tree)
                     snap[f"imports/{key}"] = digest([done, dataclasses.asdict(plan)])
+                if label == "plain" and key.startswith("handmade/"):  # the handmade ones against every tree
+                    for n, other in enumerate(trees):
+                        copy = dataclasses.replace(plan, notes=list(plan.notes))
+                        snap[f"imports/{key}/{n}"] = digest([safe(repro.complete_imports, copy, other), dataclasses.asdict(copy)])
                 plan = dataclasses.asdict(plan)
             snap[f"plan/{label}/{key}"] = digest(plan)
         snap[f"parse-after-plan/{key}"] = digest(parsed.to_dict())
@@ -250,6 +257,17 @@ def snap_text_functions(issues: list[dict], trees: list[Path], snap: dict) -> No
                 row.append(repro.classify(result, pattern, signature, False))
                 row.append(repro.classify(result, None, None))
         snap[f"match/{n}"] = digest(row)
+    snap["match/corners"] = [[repro.match_kind(sig, repro.signature_pattern(sig), out, strict), repro.match_kind(sig, None, out, strict)]
+                             for sig, out in MATCH_CORNERS for strict in (False, True)]
+
+
+# Reported errors and outputs for the corners of match_kind() that no recorded issue reaches.
+MATCH_CORNERS = [
+    ("Token.Name.Exception", "x\nToken.Name.Exception\n"), ("ValueError", "ValueError: boom"), ("pkg.CustomError", "E   pkg.CustomError\n"),
+    ("Error: one two", "Error: two one"), ("ValueError: alpha beta gamma delta epsilon zeta eta", "ValueError: eta zeta epsilon delta gamma beta alpha"),
+    ("AssertionError: assert 1 == 2", "AssertionError\n"), ("AssertionError: boom", "AssertionError\n"), ("KeyError: 'a'", "KeyError: 'b'"),
+    ("KeyError: 'a'", "\x1b[31mKeyError\x1b[0m: 'a' extra"), ("os.error: [Errno 2] No such file: '/tmp/x'", "FileNotFoundError: [Errno 2] No such file: '/home/y'"),
+]
 
 
 def snap_repositories(issues: list[dict], repos: list[Path], layout: Path, snap: dict) -> None:
