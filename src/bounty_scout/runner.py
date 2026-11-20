@@ -163,6 +163,18 @@ def docker_argv(
     return argv + [image, *limit, "sh", "-c", script]
 
 
+_PULLED: set[str] = set()
+
+
+def ensure_pulled(image: str) -> None:
+    """Fetch the image before the first test, so the download is not charged to that test's time limit or output."""
+    if image in _PULLED:
+        return
+    _PULLED.add(image)
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
+        subprocess.run(["docker", "pull", "-q", image], capture_output=True, timeout=900)
+
+
 def ensure_image(base: str, packages: list[str]) -> str:
     """A local image that is ``base`` plus the maintainer's pip packages. Built once, then reused.
 
@@ -194,6 +206,7 @@ def run_isolated(
     try:
         if sandbox == "docker":
             inner = {"PYTHONPATH": "/work:/work/src", "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp", "CI": "1"}
+            ensure_pulled(docker_image)
             name = f"scout-{os.getpid()}-{int(time.time() * 1000) % 10**9}"
             argv = docker_argv(script, worktree, repro_dir, docker_image, docker_network, inner, name, timeout)
             # The docker CLI needs the caller's HOME/DOCKER_* to find the daemon; the container sees none of it.

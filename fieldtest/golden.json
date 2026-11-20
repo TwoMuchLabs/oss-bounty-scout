@@ -1,11 +1,13 @@
 {
-  "_about": "Culprit commits the field test found on 20 Nov 2026. A replay that loses or changes one fails the job. Two are confirmed by maintainers in the issue thread (attrs #804, click #3449); the rest are unconfirmed.",
+  "_about": "Culprit commits the field test found on 20 Nov 2026, across the projects the tool was tuned on and the holdout projects it was not. A replay that loses or changes one fails the job. Five are confirmed by maintainers in the issue thread; the rest are unconfirmed.",
   "culprits": {
     "pallets/werkzeug": {
       "2706": "082e0e5b9c01fa3178ac0153413f082616f10914",
       "2465": "88125beebc6463e571cef3ca84eccfad0c818ae3",
       "2359": "7fff62feaaa5ae398d443ecf4349adc826d7da6a",
-      "2518": "5a7c0dec029d296a5e8131c8db51ce19e28c0c58"
+      "2518": "5a7c0dec029d296a5e8131c8db51ce19e28c0c58",
+      "2989": "0294d88b9c10fe079ecfe9e02129d52b1e95de54",
+      "2657": "6613fb9a6cf6711c958ae5ac03639608f131be58"
     },
     "python-poetry/tomlkit": {
       "476": "7f237d8f5d07d23422571e9daaf411f4a2356855",
@@ -35,6 +37,29 @@
       "1633": "824b4d3e5bb789cabd7cef74e57f4d802a7b2bfd",
       "1612": "1932ce3dc44e16394888cf04666d9b7a1795da76",
       "1438": "e802be7520acec0d181ab442922ea11f986c3e4e"
+    },
+    "PyCQA/isort": {
+      "1866": "52ea01b4d967bbd9d06fe6d7220c0ccd1e67cd4e"
+    },
+    "pypa/packaging": {
+      "638": "53dbb257e5fef150d32ef85c7427133d71651989"
+    },
+    "pyparsing/pyparsing": {
+      "618": "5554fbfed81ccd8919075f23bc82ea8485014d6d"
+    },
+    "tqdm/tqdm": {
+      "1828": "a61850121baa2f988bab9251b4d0567c4b5da53e",
+      "859": "ac2d5f96d3c7f27df3b596dcda9ae87544274b3b"
+    },
+    "more-itertools/more-itertools": {
+      "1250": "7847d4324a581da8d0919734a8e50b2a6573b780"
+    },
+    "arrow-py/arrow": {
+      "890": "609b630b9f5a4b814377053965b93d78fd979c64",
+      "851": "3b548854094ecab4576a4d88f842a21fe86a3123",
+      "630": "dd5b8553921a306c86166bc19838c272c836b0e3",
+      "501": "a33a1eff50087e725bdfe82a51caf79275c99c17",
+      "273": "a33a1eff50087e725bdfe82a51caf79275c99c17"
     }
   }
 }
