@@ -135,32 +135,38 @@ def _pick_block(issue: ParsedIssue, kind: str):
     return ordered[0] if ordered else None
 
 
+def _runs_own_tests(tree: ast.Module, tests: list) -> bool:
+    called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    return any(t.name in called for t in tests) or "pytest" in called or "main" in called
+
+
+def _needs_pytest(tests: list, classes: list) -> bool:
+    """Test classes, and test functions with arguments or decorators, only work under pytest."""
+    return bool(classes) or any(
+        t.args.args or t.args.kwonlyargs or t.decorator_list or isinstance(t, ast.AsyncFunctionDef) for t in tests)
+
+
 def _pytest_style(snippet: str, pytest_output: bool = False) -> tuple[str, str, str | None]:
     """A snippet that only *defines* ``test_`` functions does nothing when run as a script.
 
     Call them ourselves when they take no arguments; otherwise they need pytest's fixtures.
     """
-    plain = "python3 {test_file}"
+    as_written = (snippet, "python3 {test_file}", None)
     try:
         tree = ast.parse(snippet)
     except (SyntaxError, ValueError):
-        return snippet, plain, None
+        return as_written
     tests = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test")]
     classes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name.startswith("Test")]
-    if not tests and not classes:
-        return snippet, plain, None
-    called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    if any(t.name in called for t in tests) or "pytest" in called or "main" in called:
-        return snippet, plain, None  # the snippet already runs its own tests
-    needs_pytest = classes or any(
-        t.args.args or t.args.kwonlyargs or t.decorator_list or isinstance(t, ast.AsyncFunctionDef) for t in tests)
-    if needs_pytest and not pytest_output:
-        return snippet, plain, None  # nothing says the reporter used pytest: run it the way it reads
-    if needs_pytest:
+    if not (tests or classes) or _runs_own_tests(tree, tests):
+        return as_written
+    if _needs_pytest(tests, classes):
+        if not pytest_output:
+            return as_written  # nothing says the reporter used pytest: run it the way it reads
         return (snippet, "python3 -m pytest -q -x -p no:cacheprovider {test_file}",
                 "The snippet defines tests that need pytest (fixtures, parameters or classes), so it was run with pytest.")
     calls = "\n".join(f"{t.name}()" for t in tests)
-    return (f"{snippet.rstrip()}\n\n# added: the snippet defines these tests but never calls them\n{calls}\n", plain,
+    return (f"{snippet.rstrip()}\n\n# added: the snippet defines these tests but never calls them\n{calls}\n", as_written[1],
             "The snippet only defined test functions, so calls to them were added: " + ", ".join(f"`{t.name}()`" for t in tests) + ".")
 
 
