@@ -55,6 +55,25 @@ def changed_hunks(repo: str | Path, sha: str) -> list[Hunk]:
     return hunks
 
 
+def _shared_suffix(parts: list[str], other: list[str]) -> int:
+    """How many trailing path components two paths have in common."""
+    n = 0
+    while n < min(len(parts), len(other)) and parts[-1 - n] == other[-1 - n]:
+        n += 1
+    return n
+
+
+def _closest_file(parts: list[str], candidates: list[str]) -> str | None:
+    """The tracked file that shares the longest path suffix with the frame's path."""
+    best, best_len = None, 0
+    for candidate in candidates:
+        n = _shared_suffix(parts, candidate.split("/"))
+        if n > best_len or (n == best_len and best and len(candidate) < len(best)):
+            best, best_len = candidate, n
+    # A bare filename only counts when unambiguous.
+    return best if best and (best_len > 1 or len(candidates) == 1) else None
+
+
 def resolve_frames(repo: str | Path, ref: str, frames: list[tuple[str, int]], strip_prefix: str | None = None) -> list[tuple[str, int]]:
     """Map paths from a traceback (often absolute, or from site-packages) onto tracked files."""
     tracked = git(repo, "ls-tree", "-r", "--name-only", ref).stdout.splitlines()
@@ -66,18 +85,8 @@ def resolve_frames(repo: str | Path, ref: str, frames: list[tuple[str, int]], st
         if strip_prefix and file.startswith(strip_prefix):
             file = file[len(strip_prefix):].lstrip("/")
         parts = [p for p in file.split("/") if p not in ("", ".")]
-        if not parts:
-            continue
-        best, best_len = None, 0
-        for candidate in by_name.get(parts[-1], []):
-            cparts = candidate.split("/")
-            n = 0
-            while n < min(len(parts), len(cparts)) and parts[-1 - n] == cparts[-1 - n]:
-                n += 1
-            # Longest shared suffix wins; a bare filename only counts when unambiguous.
-            if n > best_len or (n == best_len and best and len(candidate) < len(best)):
-                best, best_len = candidate, n
-        if best and (best_len > 1 or len(by_name[parts[-1]]) == 1):
+        best = _closest_file(parts, by_name.get(parts[-1], [])) if parts else None
+        if best:
             resolved.append((best, line))
     return resolved
 
