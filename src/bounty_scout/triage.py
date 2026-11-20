@@ -31,6 +31,7 @@ class Options:
     trust_issue_code: bool = False
     first_parent: bool = False
     bisect: bool = True
+    strict: bool = False  # count only the reported error line itself, never a similar message
     ai: str | None = None  # off | anthropic | openai | command
     ai_model: str | None = None
     ai_base_url: str | None = None
@@ -53,6 +54,8 @@ class TriageResult:
     suspect: Suspect | None = None
     fix: Fix | None = None
     notes: list[str] = field(default_factory=list)
+    match: str | None = None  # how the failure was recognised: exact | similar | type-only | exit-code
+    in_project: bool = True  # False when the error never passes through the project's own files
     regression: str | None = None  # "yes" | "no" | "unknown", once history has been searched
     oldest_failing: str | None = None  # when regression == "no": the oldest version that already fails
     ai_label: str | None = None  # set when AI assistance was switched on
@@ -156,7 +159,7 @@ def _attempt(repo, result, plan: ReproPlan, cfg, opts, sandbox, repro_dir, issue
     spec = CheckSpec(
         command=command, setup=opts.setup_cmd or cfg.setup,
         signature_pattern=signature_pattern(plan.signature), signature=plan.signature,
-        timeout=opts.timeout or cfg.timeout, sandbox=sandbox, repro_dir=str(repro_dir),
+        strict=opts.strict, timeout=opts.timeout or cfg.timeout, sandbox=sandbox, repro_dir=str(repro_dir),
         docker_image=_sandbox_image(repo, result, issue or result.issue, plan, cfg) if sandbox == "docker" else cfg.docker_image,
         docker_network=cfg.docker_network, pass_env=cfg.pass_env,
     )
@@ -266,6 +269,9 @@ def _run(repo, result, issue, body, plan, cfg, opts, sandbox, repro_dir, ai) -> 
     # The exact reported line appeared here, so in this environment nothing needs rewording tolerance:
     # from now on (baseline, bisect, checking a fix) only that line counts, not a similar message.
     spec.strict = head.reason.startswith("reported error present")
+    result.match = ("exact" if spec.strict else "similar" if "similar message" in head.reason
+                    else "type-only" if "no message to compare" in head.reason else "exit-code")
+    result.in_project = bool(head_frames) or plan.source not in ("python-snippet", "ai-test")
     if not head_frames and plan.source in ("python-snippet", "ai-test"):
         result.notes.append(
             "The error is raised without passing through the project's own files: it comes from the snippet itself "
@@ -311,7 +317,8 @@ def _trace(repo, result, issue, cfg, opts, spec, head_frames) -> None:
             result.regression, result.oldest_failing = "no", oldest
             result.notes.append(
                 f"Probably not a regression: it already fails the same way at `{oldest}`, the oldest version that "
-                "could be tested. Pass `--good <ref>` if you know a version where it worked."
+                "could be tested. It may be long-standing behaviour, or even intended, rather than something that broke. "
+                "Pass `--good <ref>` if you know a version where it worked."
             )
         else:
             result.regression = "unknown"

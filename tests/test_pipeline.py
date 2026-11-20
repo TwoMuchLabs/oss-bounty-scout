@@ -163,6 +163,9 @@ class MatchingTests(unittest.TestCase):
     def test_false_positives_found_in_the_field(self):
         # a different name is a different error (tqdm #872, isort #2723)
         self.assertFalse(error_matches("NameError: name 'IProgress' is not defined", None, "NameError: name 'tfds' is not defined"))
+        # ...but an apostrophe in prose is not a quoted name (jinja #1612)
+        pickle = "_pickle.PicklingError: Can't pickle <function sync_do_first at 0x{}>: it's not the same object as jinja2.filters.sync_do_first"
+        self.assertTrue(error_matches(pickle.format("7f1a2b3c4d50"), None, pickle.format("7869cc3c4680")))
         self.assertFalse(error_matches("ModuleNotFoundError: No module named 'os.parse'; 'os' is not a package", None,
                                        "ModuleNotFoundError: No module named 'http.parse'"))
         # text that merely ends in "Exception" is not an exception (pygments #1816)
@@ -394,7 +397,9 @@ class TriageTests(RepoCase):
         self.assertIn("+    if not values:", result.fix.diff)
         self.assertNotIn("CHANGELOG", result.fix.diff)
 
+        self.assertEqual((result.match, result.in_project, result.regression), ("exact", True, "yes"))
         report = render(result)
+        self.assertIn("| **Confidence** | **High**: an earlier version (`v1.1.0`) passes this test", report)
         for expected in ("**Reproduced**", self.info["culprit"][:10], "`statskit/core.py:7`", "```diff",
                          "from statskit import mean\n\nprint(mean([]))", "Ubuntu 22.04", "reported working in `1.1.0`", "Verified:"):
             self.assertIn(expected, report)
@@ -457,6 +462,7 @@ class TriageTests(RepoCase):
         self.assertEqual(result.regression, "no")
         self.assertIn("Probably not a regression", result.notes[0])
         self.assertIn("Probably not: already fails at", render(result))
+        self.assertIn("| **Confidence** | **Low**: every version that could be tested fails the same way", render(result))
 
     def test_regression_is_unknown_when_no_older_version_can_run(self):
         # The helper module only exists from the culprit onwards, so every older version fails differently.

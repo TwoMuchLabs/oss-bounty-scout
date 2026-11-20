@@ -25,7 +25,7 @@ from pathlib import Path
 
 from bounty_scout.config import Config
 from bounty_scout.issue_parser import parse_issue
-from bounty_scout.report import render
+from bounty_scout.report import confidence, render
 from bounty_scout.repro import build_plan
 from bounty_scout.runner import git
 from bounty_scout.triage import Options, triage
@@ -86,8 +86,8 @@ def cmd_fetch(args) -> int:
     return 0
 
 
-def _match(reason: str) -> str:
-    return "similar" if "similar message" in reason else "type-only" if "no message to compare" in reason else "exact"
+def args_kind_node(result) -> bool:
+    return bool(result.plan and result.plan.source == "node-snippet")
 
 
 def _ts(value: str) -> datetime:
@@ -123,8 +123,9 @@ def cmd_run(args) -> int:
                        signature=result.issue.error_signature,
                        head_reason=result.head.reason if result.head else None,
                        head_tail=result.head.result.output.strip().splitlines()[-5:] if result.head else None,
-                       in_project=not any('without passing through' in n for n in result.notes),
-                       match=_match(result.head.reason) if result.head and result.status == "reproduced" else None,
+                       in_project=result.in_project,
+                       match=result.match, confidence=(confidence(result) or [None])[0],
+                       head_first=result.head.result.output.strip().splitlines()[:4] if result.head and args_kind_node(result) else None,
                        python=next((n.split()[3].rstrip(",") for n in result.notes if n.startswith("Ran on Python")), None))
             b = result.bisect
             if b:
@@ -149,7 +150,9 @@ def cmd_run(args) -> int:
                 fix = None
             after = fix or (raw.get("closed_at") and _commit_before(repo, (_ts(raw["closed_at"]) + timedelta(minutes=5)).isoformat()))
             if result.status == "reproduced" and after and after != bad:
-                recheck = triage(repo, raw, cfg, Options(bad=after, bisect=False, trust_issue_code=args.sandbox == "worktree"))
+                # Hold the re-check to the same standard the original met: if the exact line was seen, only that line counts.
+                recheck = triage(repo, raw, cfg, Options(bad=after, bisect=False, strict=result.match == "exact",
+                                                         trust_issue_code=args.sandbox == "worktree"))
                 row["after_fix"] = recheck.status  # "not-reproduced" means the real fix makes our test pass
                 if fix and recheck.status == "reproduced" and any(not NOT_CODE.search(f) for f in _files(repo, fix)):
                     # The cases to distrust. Put enough in the log to judge each one by hand.
@@ -216,6 +219,9 @@ def summarise(data: dict, rows: list[dict]) -> dict:
         **{f"match_{kind.replace('-', '_')}": count(lambda r, kind=kind: r.get("match") == kind) for kind in ("exact", "similar", "type-only")},
         **{f"match_{kind.replace('-', '_')}_fix_passes": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_changes_code") and r.get("after_fix") == "not-reproduced") for kind in ("exact", "similar", "type-only")},
         **{f"match_{kind.replace('-', '_')}_fix_fails": count(lambda r, kind=kind: r.get("match") == kind and r.get("fix_changes_code") and r.get("after_fix") == "reproduced") for kind in ("exact", "similar", "type-only")},
+        **{f"confidence_{lv}": count(lambda r, lv=lv: r.get("confidence") == lv) for lv in ("high", "medium", "low")},
+        **{f"confidence_{lv}_fix_passes": count(lambda r, lv=lv: r.get("confidence") == lv and r.get("fix_changes_code") and r.get("after_fix") == "not-reproduced") for lv in ("high", "medium", "low")},
+        **{f"confidence_{lv}_fix_fails": count(lambda r, lv=lv: r.get("confidence") == lv and r.get("fix_changes_code") and r.get("after_fix") == "reproduced") for lv in ("high", "medium", "low")},
         "regression_yes": count(lambda r: r.get("regression") == "yes"),
         "regression_no": count(lambda r: r.get("regression") == "no"),
         "regression_unknown": count(lambda r: r.get("regression") == "unknown"),

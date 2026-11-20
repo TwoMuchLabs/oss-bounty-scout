@@ -450,7 +450,8 @@ def error_matches(signature: str | None, pattern: str | None, output: str) -> bo
     return match_kind(signature, pattern, output) is not None
 
 
-_QUOTED = re.compile(r"'([^'\n]{1,60})'|\"([^\"\n]{1,60})\"|`([^`\n]{1,60})`")
+# No spaces inside the quotes: that keeps names ('os.path', 'value-1') and skips apostrophes in prose ("can't ... it's").
+_QUOTED = re.compile(r"'([^'\s]{1,60})'|\"([^\"\s]{1,60})\"|`([^`\s]{1,60})`")
 
 
 def _names_agree(want: str, got: str) -> bool:
