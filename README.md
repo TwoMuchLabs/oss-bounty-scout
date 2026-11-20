@@ -14,7 +14,7 @@ No LLM, no API keys, no dependencies beyond Python 3.11+, `git` and the [GitHub 
 ## Install
 
 ```sh
-pip install git+https://github.com/TwoMuchLabs/oss-bounty-scout@v0.1.0
+pip install git+https://github.com/TwoMuchLabs/oss-bounty-scout
 ```
 
 ## Use

@@ -48,7 +48,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install oss-bounty-scout
-        run: pip install "git+https://github.com/TwoMuchLabs/oss-bounty-scout@v0.1.0"
+        run: pip install "git+https://github.com/TwoMuchLabs/oss-bounty-scout@main"
 
       - name: Fetch the issue
         env:
