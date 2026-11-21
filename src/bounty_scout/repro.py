@@ -349,7 +349,9 @@ def _usage(code: str) -> tuple[set[str], dict[str, set[str]]]:
 def _stdlib_import(name: str, called: set[str], used: set[str]) -> str:
     """``import datetime`` or ``from datetime import datetime``? Decide from how the name is used."""
     try:
-        module = importlib.import_module(name)  # standard library only: safe to import
+        # Standard library only, and no issue code runs. Known side effect, documented in the README and left
+        # as it is: a few modules act on import ("this" prints, "antigravity" opens a browser).
+        module = importlib.import_module(name)
     except Exception:
         return f"import {name}"
     member = getattr(module, name, None)

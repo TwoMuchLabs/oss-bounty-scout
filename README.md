@@ -109,6 +109,7 @@ Issues contain code written by strangers. By default, code from an issue is exec
 - The worktree runner protects your checkout and scrubs the environment (no tokens, throw-away `HOME`). It is **not** a security sandbox.
 - For untrusted code use `--sandbox docker`: no network, dropped capabilities, CPU/memory/PID limits, non-root user.
 - Your working tree, index and any bisect you have in progress are never touched.
+- One thing runs outside the sandbox, in the scout's own process: when a snippet uses a name it never imports and that name is a Python standard-library module, the scout imports that module to choose between `import x` and `from x import x`. No code from the issue runs, but a few standard modules do something on import: `this` prints a poem into the scout's output, and `antigravity` asks the system to open a web browser. It happens for any report whose code is allowed to run, which with `--sandbox docker` means reports from anyone. Known and left as it is; see Limits.
 
 ## GitHub Action
 
@@ -165,6 +166,7 @@ Each round of reading failures has moved the tuned-set numbers: 59 reproduced an
 - Bisecting stops when more than 20 commits in the range cannot be tested. Pass a nearer `--good`.
 - Field-tested mostly on Python. JavaScript works for complete snippets but few real reports are complete; TypeScript is not handled. Shell steps have unit tests but no field test. POSIX only.
 - The project runs from its source tree, not installed, unless your `setup` installs it. Bugs that depend on package metadata can look different.
+- Filling in a forgotten import loads the named standard-library module in the scout's own process (see Safety). A report that uses `this` or `antigravity` as a bare name therefore prints text into the run's output or tries to open a browser. Nothing from the issue is executed by this, and the triage result is not affected.
 
 ## Development
 
